@@ -1,4 +1,7 @@
+# frozen_string_literal: true
 require_relative "../test_helper"
+
+SingleCov.covered!
 
 describe EnvironmentVariable do
   let(:project) { stage.project }
@@ -38,16 +41,18 @@ describe EnvironmentVariable do
       end
 
       it "includes only common for common groups" do
-        EnvironmentVariable.env(project, nil).must_equal("X"=>"Y", "Y" => "Z", "PROJECT" => "PROJECT")
+        EnvironmentVariable.env(project, nil).must_equal("X" => "Y", "Y" => "Z", "PROJECT" => "PROJECT")
       end
 
       it "includes common for scoped groups" do
-        EnvironmentVariable.env(project, deploy_group).must_equal("PROJECT"=>"DEPLOY", "X"=>"Y", "Z"=>"A", "Y"=>"Z")
+        EnvironmentVariable.env(project, deploy_group).must_equal(
+          "PROJECT" => "DEPLOY", "X" => "Y", "Z" => "A", "Y" => "Z"
+        )
       end
 
       it "overwrites environment groups with project variables" do
         project.environment_variables.create!(name: "X", value: "OVER")
-        EnvironmentVariable.env(project, nil).must_equal("X"=>"OVER", "Y" => "Z", "PROJECT" => "PROJECT")
+        EnvironmentVariable.env(project, nil).must_equal("X" => "OVER", "Y" => "Z", "PROJECT" => "PROJECT")
       end
 
       it "keeps correct order for different priorities" do
@@ -60,7 +65,9 @@ describe EnvironmentVariable do
         project.environment_variables.create!(name: "Y", value: "ENV", scope: environment)
         project.environment_variables.create!(name: "Y", value: "ALL")
 
-        EnvironmentVariable.env(project, deploy_group).must_equal("X"=>"GROUP", "Y" => "ENV", "PROJECT" => "DEPLOY", "Z" => "A")
+        EnvironmentVariable.env(project, deploy_group).must_equal(
+          "X" => "GROUP", "Y" => "ENV", "PROJECT" => "DEPLOY", "Z" => "A"
+        )
       end
 
       it "produces few queries when doing multiple versions as the env builder does" do
@@ -74,13 +81,76 @@ describe EnvironmentVariable do
       it "can resolve references" do
         project.environment_variables.last.update_column(:value, "PROJECT--$POD_ID--$POD_ID_NOT--${POD_ID}")
         project.environment_variables.create!(name: "POD_ID", value: "1")
-        EnvironmentVariable.env(project, nil).must_equal("PROJECT"=>"PROJECT--1--$POD_ID_NOT--1", "POD_ID"=>"1", "X"=>"Y", "Y"=>"Z")
+        EnvironmentVariable.env(project, nil).must_equal(
+          "PROJECT" => "PROJECT--1--$POD_ID_NOT--1", "POD_ID" => "1", "X" => "Y", "Y" => "Z"
+        )
+      end
+
+      describe "secrets" do
+        before { project.environment_variables.last.update_column(:value, "secret://foobar") }
+
+        it "can resolve secrets" do
+          create_secret 'global/global/global/foobar'
+          EnvironmentVariable.env(project, nil).must_equal(
+            "PROJECT" => "MY-SECRET", "X" => "Y", "Y" => "Z"
+          )
+        end
+
+        it "fails on unfound secrets" do
+          e = assert_raises Samson::Hooks::UserError do
+            EnvironmentVariable.env(project, nil)
+          end
+          e.message.must_include "Failed to resolve secret keys:\n\tfoobar"
+        end
       end
     end
   end
 
-  describe "#scope_type_and_id=" do
+  describe ".env_deploygroup_array" do
+    it "includes All" do
+      all = EnvironmentVariable.env_deploygroup_array
+      all.map! { |name, value| [name, value&.sub(/-\d+/, '-X')] }
+      all.must_equal(
+        [
+          ["All", nil],
+          ["Production", "Environment-X"],
+          ["Staging", "Environment-X"],
+          ["----", nil],
+          ["Pod1", "DeployGroup-X"],
+          ["Pod2", "DeployGroup-X"],
+          ["Pod 100", "DeployGroup-X"]
+        ]
+      )
+    end
 
+    it "does not includes All when requested" do
+      EnvironmentVariable.env_deploygroup_array(include_all: false).wont_include ["All", nil]
+    end
+  end
+
+  describe ".matches?" do
+    it "fails on bad references" do
+      e = assert_raises RuntimeError do
+        EnvironmentVariable.send(
+          :matches?,
+          EnvironmentVariable.new(scope_type: 'Foo', scope_id: 123),
+          deploy_groups(:pod1)
+        )
+      end
+      e.message.must_equal "Unsupported scope Foo"
+    end
+  end
+
+  describe "#priority" do
+    it "fails on bad references" do
+      e = assert_raises RuntimeError do
+        EnvironmentVariable.new(scope_type: 'Foo', scope_id: 123).send(:priority)
+      end
+      e.message.must_equal "Unsupported scope Foo"
+    end
+  end
+
+  describe "#scope_type_and_id=" do
     it "splits type and id" do
       environment_variable.scope_type_and_id = deploy_group_scope_type_and_id
       environment_variable.scope.must_equal deploy_group

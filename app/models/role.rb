@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require 'active_hash'
 
 class Role < ActiveHash::Base
@@ -11,4 +12,8 @@ class Role < ActiveHash::Base
   ]
 
   enum_accessor :name
+
+  def display_name
+    name.humanize
+  end
 end

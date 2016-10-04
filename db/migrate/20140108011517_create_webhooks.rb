@@ -1,9 +1,10 @@
-class CreateWebhooks < ActiveRecord::Migration
+# frozen_string_literal: true
+class CreateWebhooks < ActiveRecord::Migration[4.2]
   def change
     create_table :webhooks do |t|
-      t.integer :project_id, :null => false
-      t.integer :stage_id, :null => false
-      t.string :branch, :null => false
+      t.integer :project_id, null: false
+      t.integer :stage_id, null: false
+      t.string :branch, null: false
 
       t.timestamps
 

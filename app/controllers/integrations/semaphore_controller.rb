@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 class Integrations::SemaphoreController < Integrations::BaseController
   protected
 
@@ -7,7 +8,7 @@ class Integrations::SemaphoreController < Integrations::BaseController
   end
 
   def skip?
-    contains_skip_token?(params[:commit][:message])
+    contains_skip_token?(message)
   end
 
   def commit
@@ -16,5 +17,9 @@ class Integrations::SemaphoreController < Integrations::BaseController
 
   def branch
     params[:branch_name]
+  end
+
+  def message
+    params[:commit][:message]
   end
 end

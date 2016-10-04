@@ -1,4 +1,5 @@
-class CreateReleases < ActiveRecord::Migration
+# frozen_string_literal: true
+class CreateReleases < ActiveRecord::Migration[4.2]
   def change
     create_table :releases do |t|
       t.integer :project_id, null: false

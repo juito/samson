@@ -1,4 +1,5 @@
-class CreateStars < ActiveRecord::Migration
+# frozen_string_literal: true
+class CreateStars < ActiveRecord::Migration[4.2]
   def change
     create_table :stars do |t|
       t.integer :user_id, null: false

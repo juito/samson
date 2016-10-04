@@ -1,6 +1,12 @@
+# frozen_string_literal: true
 ENV["RAILS_ENV"] ||= "test"
 
-ENV['PROJECT_CREATED_NOTIFY_ADDRESS'] = 'blah@example.com'
+require 'bundler/setup'
+
+# anything loaded before coverage will be uncovered
+require 'single_cov'
+SingleCov::APP_FOLDERS << 'decorators' << 'presenters'
+SingleCov.setup :minitest
 
 if ENV['CODECLIMATE_REPO_TOKEN']
   require 'codeclimate-test-reporter'
@@ -10,12 +16,20 @@ elsif ENV['COVERAGE']
   SimpleCov.start 'rails'
 end
 
+# rake adds these, but we don't need them / want to be consistent with using `ruby x_test.rb`
+$LOAD_PATH.delete 'lib'
+$LOAD_PATH.delete 'test'
+
 require_relative '../config/environment'
 require 'rails/test_help'
 require 'minitest/rails'
+require 'rails-controller-testing'
 require 'maxitest/autorun'
+require 'maxitest/timeout'
 require 'webmock/minitest'
 require 'mocha/setup'
+
+require 'sucker_punch/testing/inline'
 
 # Use ActiveSupport::TestCase for everything that was not matched before
 MiniTest::Spec::DSL::TYPES[-1] = [//, ActiveSupport::TestCase]
@@ -52,11 +66,7 @@ class ActiveSupport::TestCase
 
   ActiveRecord::Migration.check_pending!
 
-  # Setup all fixtures in test/fixtures/*.yml for all tests in alphabetical order.
-  #
-  # Note: You'll currently still have to declare fixtures explicitly in integration tests
-  # -- they do not yet inherit this setting
-  Samson::Hooks.plugin_test_setup
+  Samson::Hooks.symlink_plugin_fixtures
   fixtures :all
 
   before do
@@ -64,28 +74,24 @@ class ActiveSupport::TestCase
     create_default_stubs
   end
 
-  after { sleep 0.1 while extra_threads.present? }
-
-  def extra_threads
-    normal = ENV['CI'] ? 3 : 4 # there are always 4 threads hanging around, 2 unknown, 1 from SSE Engine, and 1 from the test timeout helper code
-    threads = (Thread.list - [Thread.current])
-    raise "too low threads, adjust minimum" if threads.size < normal
-    threads.sort_by(&:object_id)[normal..-1] # always kill the newest threads (run event_streamer_test.rb + stage_test.rb to make it blow up)
-  end
-
   def assert_valid(record)
     assert record.valid?, record.errors.full_messages
   end
 
-  def refute_valid(record)
-    refute record.valid?
+  def refute_valid(record, error_keys = nil)
+    refute record.valid?, "Expected record of type #{record.class.name} to be invalid"
+
+    Array.wrap(error_keys).compact.each do |key|
+      record.errors.keys.must_include key
+    end
   end
 
   def ar_queries
+    require 'query_diet'
     QueryDiet::Logger.queries.map(&:first) - ["select 1"]
   end
 
-  def assert_sql_queries(count, &block)
+  def assert_sql_queries(count)
     old = ar_queries
     yield
     new = ar_queries
@@ -101,15 +107,65 @@ class ActiveSupport::TestCase
   # record hook and their arguments called during a given block
   def record_hooks(callback, &block)
     called = []
-    Samson::Hooks.with_callback(callback, lambda{ |*args| called << args }, &block)
+    Samson::Hooks.with_callback(callback, lambda { |*args| called << args }, &block)
     called
   end
 
   def silence_stderr
-    old, $VERBOSE = $VERBOSE, nil
+    old = $VERBOSE
+    $VERBOSE = nil
     yield
   ensure
     $VERBOSE = old
+  end
+
+  undef :assert_nothing_raised
+  class << self
+    undef :test
+  end
+
+  def create_secret(key)
+    SecretStorage::DbBackend::Secret.create!(
+      id: key,
+      value: 'MY-SECRET',
+      visible: false,
+      comment: 'this is secret',
+      updater_id: users(:admin).id,
+      creator_id: users(:admin).id
+    )
+  end
+
+  def with_env(env)
+    old = env.map do |k, v|
+      k = k.to_s
+      o = ENV[k]
+      ENV[k] = v
+      [k, o]
+    end
+    yield
+  ensure
+    old.each { |k, v| ENV[k] = v }
+  end
+
+  def self.with_env(env)
+    around { |test| with_env(env, &test) }
+  end
+
+  def self.run_inside_of_temp_directory
+    around { |test| Dir.mktmpdir { |dir| Dir.chdir(dir) { test.call } } }
+  end
+
+  def self.assert_route(verb, path, to:, params: {})
+    controller, action = to.split("#", 2)
+    it_name = "routes to #{controller} #{action}"
+    it_name += params.keys.empty? ? " with no parameters" : " with parameters #{params}"
+
+    describe "a #{verb} to #{path}" do
+      it it_name do
+        verb = verb.to_s.upcase
+        assert_routing({method: verb, path: path}, {controller: controller, action: action}.merge(params))
+      end
+    end
   end
 end
 
@@ -126,47 +182,128 @@ class ActionController::TestCase
   class << self
     def unauthorized(method, action, params = {})
       it "is unauthorized when doing a #{method} to #{action} with #{params}" do
-        send(method, action, params)
-        @unauthorized.must_equal true, "Request was not marked unauthorized"
+        public_send method, action, params: params
+        assert_unauthorized
       end
     end
 
-    %w{super_admin admin deployer viewer}.each do |user|
+    %w[super_admin admin deployer viewer project_admin project_deployer].each do |user|
       define_method "as_a_#{user}" do |&block|
         describe "as a #{user}" do
-          setup { request.env['warden'].set_user(users(user)) }
+          let(:user) { users(user) }
+          before { request.env['warden'].set_user(self.user) } # rubocop:disable Style/RedundantSelf
           instance_eval(&block)
         end
       end
     end
   end
 
-  setup do
-    middleware = Rails.application.config.middleware.detect {|m| m.name == 'Warden::Manager'}
+  def json!
+    request.env['CONTENT_TYPE'] = 'application/json'
+  end
+
+  def auth!(header)
+    request.env['HTTP_AUTHORIZATION'] = header
+  end
+
+  before do
+    middleware = Rails.application.config.middleware.detect { |m| m.name == 'Warden::Manager' }
     manager = Warden::Manager.new(nil, &middleware.block)
     request.env['warden'] = Warden::Proxy.new(request.env, manager)
-
-    stub_request(:get, "https://#{Rails.application.config.samson.github.status_url}/api/status.json").to_timeout
+    stub_request(:get, "#{Rails.application.config.samson.github.status_url}/api/status.json").to_timeout
     create_default_stubs
   end
 
-  teardown do
+  after do
     Warden.test_reset!
+  end
+
+  def set_form_authenticity_token
+    session[:_csrf_token] = SecureRandom.base64(32)
   end
 
   def warden
     request.env['warden']
   end
 
-  def process_with_catch_warden(*args)
-    catch(:warden) do
-      return process_without_catch_warden(*args)
-    end
-
-    @unauthorized = true
+  def assert_unauthorized
+    @unauthorized.must_equal true, "Request was not marked unauthorized"
   end
 
-  alias_method_chain :process, :catch_warden
+  def refute_unauthorized
+    refute @unauthorized, "Request was marked unauthorized"
+  end
+
+  # catch warden throw
+  # TODO: make a helper that directly catches as part of the test
+  prepend(Module.new do
+    def process(*args)
+      catch(:warden) do
+        return super
+      end
+
+      @unauthorized = true
+      stub(cookies: {}) # rails calls .cookies on the response
+    end
+  end)
+
+  def self.oauth_setup!
+    let(:redirect_uri) { 'urn:ietf:wg:oauth:2.0:oob' }
+    let(:oauth_app) do
+      Doorkeeper::Application.new do |app|
+        app.name = "Test App"
+        app.redirect_uri = redirect_uri
+        app.scopes = :default
+      end
+    end
+
+    let(:user) do
+      users(:admin)
+    end
+
+    let(:token) do
+      oauth_app.access_tokens.new do |token|
+        token.resource_owner_id = user.id
+        token.application_id = oauth_app.id
+        token.expires_in = 1000
+        token.scopes = :default
+      end
+    end
+
+    before do
+      token.save!
+      json!
+      auth!("Bearer #{token.token}")
+    end
+  end
+
+  def self.use_test_routes(controller)
+    controller_name = controller.name.underscore.sub('_controller', '')
+    before do
+      Rails.application.routes.draw do
+        controller.action_methods.each do |action|
+          match(
+            "/test/:test_route/#{action}",
+            via: [:get, :post, :put, :patch, :delete],
+            controller: controller_name,
+            action: action
+          )
+        end
+      end
+    end
+
+    after do
+      Rails.application.reload_routes!
+    end
+  end
+end
+
+# https://github.com/blowmage/minitest-rails/issues/195
+class ActionController::TestCase
+  # Use AD::IntegrationTest for the base class when describing a controller
+  register_spec_type(self) do |desc|
+    desc.is_a?(Class) && desc < ActionController::Metal
+  end
 end
 
 WebMock.disable_net_connect!(allow: 'codeclimate.com')

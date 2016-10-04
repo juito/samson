@@ -1,4 +1,5 @@
-class RenameDockerDigestColumns < ActiveRecord::Migration
+# frozen_string_literal: true
+class RenameDockerDigestColumns < ActiveRecord::Migration[4.2]
   def change
     change_table :builds do |t|
       t.remove_index column: :docker_sha

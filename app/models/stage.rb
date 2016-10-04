@@ -1,43 +1,51 @@
+# frozen_string_literal: true
 class Stage < ActiveRecord::Base
   include Permalinkable
+  include HasCommands
 
-  has_soft_deletion default_scope: true
+  has_soft_deletion default_scope: true unless self < SoftDeletion::Core
+
+  has_paper_trail skip: [:order, :updated_at, :created_at]
 
   belongs_to :project, touch: true
 
   has_many :deploys, dependent: :destroy
   has_many :webhooks, dependent: :destroy
-  has_many :new_relic_applications
+  has_many :outbound_webhooks, dependent: :destroy
+
+  belongs_to :template_stage, class_name: "Stage"
+  has_many :clones, class_name: "Stage", foreign_key: "template_stage_id"
 
   has_one :lock
 
-  has_many :stage_commands, autosave: true
-  has_many :commands,
-    -> { order('stage_commands.position ASC') },
-    through: :stage_commands, auto_include: false
+  has_many :command_associations, autosave: true, class_name: 'StageCommand', dependent: :destroy
+  has_many :commands, -> { order('stage_commands.position ASC') },
+    through: :command_associations, auto_include: false
 
-  has_and_belongs_to_many :deploy_groups
+  has_many :deploy_groups_stages, dependent: :destroy
+  has_many :deploy_groups, through: :deploy_groups_stages
 
   default_scope { order(:order) }
 
   validates :name, presence: true, uniqueness: { scope: [:project, :deleted_at] }
 
-  accepts_nested_attributes_for :new_relic_applications, allow_destroy: true, reject_if: :no_newrelic_name?
+  before_create :ensure_ordering
+  after_destroy :destroy_deploy_groups_stages
+  after_soft_delete :destroy_deploy_groups_stages
 
-  attr_writer :command
-  before_save :build_new_project_command
+  scope :cloned, -> { where.not(template_stage_id: nil) }
 
-  def self.reorder(new_order)
+  def self.reset_order(new_order)
     transaction do
       new_order.each.with_index { |stage_id, index| Stage.update stage_id.to_i, order: index.to_i }
     end
   end
 
   def self.build_clone(old_stage)
-    new(old_stage.attributes).tap do |new_stage|
+    new(old_stage.attributes.except("id")).tap do |new_stage|
       Samson::Hooks.fire(:stage_clone, old_stage, new_stage)
-      new_stage.new_relic_applications.build(old_stage.new_relic_applications.map(&:attributes))
       new_stage.command_ids = old_stage.command_ids
+      new_stage.template_stage = old_stage
     end
   end
 
@@ -79,7 +87,7 @@ class Stage < ActiveRecord::Base
   end
 
   def warning?
-    !!lock && lock.warning?
+    lock&.warning?
   end
 
   def locked_for?(user)
@@ -90,18 +98,14 @@ class Stage < ActiveRecord::Base
     last_successful_deploy && last_successful_deploy.reference == release.version
   end
 
-  def confirm_before_deploying?
-    confirm
-  end
-
   def create_deploy(user, attributes = {})
-    deploys.create(attributes) do |deploy|
-      deploy.build_job(project: project, user: user, command: command)
+    deploys.create(attributes.merge(release: !no_code_deployed)) do |deploy|
+      deploy.build_job(project: project, user: user, command: script, commit: deploy.reference)
     end
   end
 
   def currently_deploying?
-    current_deploy.present?
+    !!current_deploy
   end
 
   # The next stage for the project. If this is the last stage, returns nil.
@@ -122,48 +126,18 @@ class Stage < ActiveRecord::Base
     "#{name} - #{project.name}"
   end
 
-  def command
-    commands.map(&:command).join("\n")
-  end
-
-  def command_ids=(new_command_ids)
-    super.tap do
-      reorder_commands(new_command_ids.reject(&:blank?).map(&:to_i))
-    end
-  end
-
-  def all_commands
-    command_scope = project ? Command.for_project(project) : Command.global
-
-    if command_ids.any?
-      command_scope = command_scope.where(['id NOT in (?)', command_ids])
-    end
-
-    commands + command_scope
-  end
-
-  def datadog_tags_as_array
-    datadog_tags.to_s.split(";").map(&:strip)
-  end
-
-  def send_datadog_notifications?
-    datadog_tags_as_array.any?
-  end
-
-  def send_github_notifications?
-    update_github_pull_requests
-  end
-
+  # this logic is replicated in SQL inside of app/jobs/csv_export_job.rb#filter_deploys for report filtering
+  # update the SQL query as well when editing this method
   def production?
     if DeployGroup.enabled?
-      deploy_groups.empty? ? super : deploy_groups.any? { |deploy_group| deploy_group.environment.is_production? }
+      deploy_groups.empty? ? super : deploy_groups.any? { |deploy_group| deploy_group.environment.production? }
     else
       super
     end
   end
 
   def deploy_requires_approval?
-    BuddyCheck.enabled? && production?
+    BuddyCheck.enabled? && !no_code_deployed? && production?
   end
 
   def automated_failure_emails(deploy)
@@ -187,33 +161,27 @@ class Stage < ActiveRecord::Base
     emails.uniq.presence
   end
 
-  def datadog_monitors
-    datadog_monitor_ids.to_s.split(/, ?/).map { |id| DatadogMonitor.new(id) }
+  def command_updated_at
+    [
+      command_associations.maximum(:updated_at),
+      commands.maximum(:updated_at)
+    ].compact.max
+  end
+
+  def record_script_change
+    record_update true
+  end
+
+  def destroy
+    mark_for_destruction
+    super
+  end
+
+  def deploy_group_names
+    DeployGroup.enabled? ? deploy_groups.select(:name).sort_by(&:natural_order).map(&:name) : []
   end
 
   private
-
-  def build_new_project_command
-    return unless @command.present?
-
-    new_command = project.commands.build(command: @command)
-    stage_commands.build(command: new_command).tap do
-      reorder_commands
-    end
-  end
-
-  def reorder_commands(command_ids = self.command_ids)
-    stage_commands.each do |stage_command|
-      pos = command_ids.index(stage_command.command_id) ||
-        stage_commands.length
-
-      stage_command.position = pos
-    end
-  end
-
-  def no_newrelic_name?(newrelic_attrs)
-    newrelic_attrs['name'].blank?
-  end
 
   def permalink_base
     name
@@ -221,5 +189,20 @@ class Stage < ActiveRecord::Base
 
   def permalink_scope
     Stage.unscoped.where(project_id: project_id)
+  end
+
+  def ensure_ordering
+    return unless project
+    self.order = project.stages.maximum(:order).to_i + 1
+  end
+
+  # overwrites papertrail to record script
+  def object_attrs_for_paper_trail(attributes)
+    super(attributes.merge('script' => script))
+  end
+
+  # DeployGroupsStage has no ids so the default dependent: :destroy fails
+  def destroy_deploy_groups_stages
+    DeployGroupsStage.where(stage_id: id).delete_all
   end
 end

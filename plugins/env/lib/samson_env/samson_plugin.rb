@@ -1,25 +1,28 @@
+# frozen_string_literal: true
 module SamsonEnv
   class Engine < Rails::Engine
   end
 
   class << self
-    def write_env_files(dir, stage)
+    def write_env_files(dir, job)
+      return unless (stage = job.deploy.try(:stage))
       return unless groups = env_groups(stage.project, stage.deploy_groups.to_a)
       write_env_json_file("#{dir}/ENV.json", "#{dir}/manifest.json", groups) ||
         write_dotenv_file("#{dir}/.env", groups)
     end
 
     def env_groups(project, deploy_groups, preview: false)
-      groups = if deploy_groups.any?
-        deploy_groups.map do |deploy_group|
-          [
-            ".#{deploy_group.name.parameterize}",
-            EnvironmentVariable.env(project, deploy_group, preview: preview)
-          ]
+      groups =
+        if deploy_groups.any?
+          deploy_groups.map do |deploy_group|
+            [
+              ".#{deploy_group.name.parameterize}",
+              EnvironmentVariable.env(project, deploy_group, preview: preview)
+            ]
+          end
+        else
+          [["", EnvironmentVariable.env(project, nil, preview: preview)]]
         end
-      else
-        [["", EnvironmentVariable.env(project, nil, preview: preview)]]
-      end
       return groups if groups.any? { |_, data| data.present? }
     end
 
@@ -39,15 +42,20 @@ module SamsonEnv
     # writes a proprietary .json file with a env hash for each deploy group
     def write_env_json_file(env_json, manifest_json, groups)
       return unless File.exist?(manifest_json)
-      json = if File.exist?(env_json)
-        JSON.load(File.read(env_json)).tap { File.unlink(env_json) }
-      else
-        {}
-      end
+      json =
+        if File.exist?(env_json)
+          JSON.parse(File.read(env_json)).tap { File.unlink(env_json) }
+        else
+          {}
+        end
 
       # manifest.json includes required keys and other things we copy
-      manifest = JSON.load(File.read(manifest_json))
+      manifest = JSON.parse(File.read(manifest_json))
       settings = manifest.delete("settings")
+
+      # hackaround to support projects that have a manifest.json for
+      # a completely different purpose such as github.com/zendesk/timetracking_app
+      return false if settings.nil?
       json.reverse_merge!(manifest)
       required_keys, optional_keys = settings.keys.partition do |key|
         settings[key].fetch("required", true)
@@ -91,4 +99,8 @@ end
 
 Samson::Hooks.callback :after_deploy_setup do |dir, stage|
   SamsonEnv.write_env_files(dir, stage)
+end
+
+Samson::Hooks.callback :deploy_group_env do |project, deploy_group|
+  EnvironmentVariable.env(project, deploy_group)
 end

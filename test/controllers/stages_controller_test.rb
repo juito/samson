@@ -1,52 +1,71 @@
+# frozen_string_literal: true
 require_relative '../test_helper'
+
+SingleCov.covered!
 
 describe StagesController do
   subject { stages(:test_staging) }
+  let(:project) { subject.project }
 
-  unauthorized :get, :show, project_id: 1, id: 1, token: Rails.application.config.samson.badge_token
-  unauthorized :get, :index, project_id: 1, token: Rails.application.config.samson.badge_token, format: :svg
+  unauthorized :get, :show, project_id: :foo, id: 1, token: Rails.application.config.samson.badge_token
+  unauthorized :get, :index, project_id: :foo, token: Rails.application.config.samson.badge_token, format: :svg
 
   describe 'GET to :show with svg' do
-    let(:valid_params) {{
-      project_id: subject.project.to_param,
-      id: subject.to_param,
-      format: :svg,
-      token: Rails.application.config.samson.badge_token
-    }}
+    let(:valid_params) do
+      {
+        project_id: subject.project.to_param,
+        id: subject.to_param,
+        format: :svg,
+        token: Rails.application.config.samson.badge_token
+      }
+    end
     let(:job) { jobs(:succeeded_test) }
     let(:deploy) { deploys(:succeeded_test) }
 
     it "renders" do
-      stub_request(:get, "http://img.shields.io/badge/Staging-staging-green.svg")
-      get :show, valid_params
-      assert_response :success
-      response.content_type.must_equal Mime::SVG
+      get :show, params: valid_params
+      assert_redirected_to "https://img.shields.io/badge/Staging-staging-green.svg"
     end
 
     it "fails with invalid token" do
       assert_raises ActiveRecord::RecordNotFound do
-        get :show, valid_params.merge(token: 'invalid')
+        get :show, params: valid_params.merge(token: 'invalid')
       end
     end
 
     it "renders none without deploy" do
       deploy.destroy!
-      stub_request(:get, "http://img.shields.io/badge/Staging-None-red.svg")
-      get :show, valid_params
-      assert_response :success
-      response.content_type.must_equal Mime::SVG
+      get :show, params: valid_params
+      assert_redirected_to "https://img.shields.io/badge/Staging-None-red.svg"
     end
 
     it "renders strange characters" do
       subject.update_column(:name, 'Foo & Bar 1-4')
-      stub_request(:get, "http://img.shields.io/badge/Foo%20%26%20Bar%201--4-staging-green.svg")
-      get :show, valid_params
-      assert_response :success
-      response.content_type.must_equal Mime::SVG
+      get :show, params: valid_params
+      assert_redirected_to "https://img.shields.io/badge/Foo%20%26%20Bar%201--4-staging-green.svg"
     end
   end
 
-  as_a_deployer do
+  as_a_viewer do
+    unauthorized :get, :index, project_id: :foo
+    unauthorized :get, :new, project_id: :foo
+    unauthorized :post, :create, project_id: :foo
+    unauthorized :get, :show, project_id: :foo, id: 1
+    unauthorized :get, :edit, project_id: :foo, id: 1
+    unauthorized :patch, :update, project_id: :foo, id: 1
+    unauthorized :delete, :destroy, project_id: :foo, id: 1
+    unauthorized :patch, :reorder, project_id: :foo, id: 1
+    unauthorized :get, :clone, project_id: :foo, id: 1
+  end
+
+  as_a_project_deployer do
+    describe "#index" do
+      it "renders html" do
+        get :index, params: {project_id: project}
+        assert_template 'index'
+      end
+    end
+
     describe 'GET to :show' do
       describe 'valid' do
         before do
@@ -54,46 +73,50 @@ describe StagesController do
         end
 
         it 'renders the template' do
-          get :show, project_id: subject.project.to_param, id: subject.to_param
+          get :show, params: {project_id: subject.project.to_param, id: subject.to_param}
           assert_template :show
         end
 
         it 'displays a sanitized dashboard' do
           subject.update_attribute :dashboard,
-            'START_OF_TEXT<p>PARAGRAPH_TEXT</p><img src="foo.jpg"/><iframe src="http://localhost/foo.txt"></iframe><script>alert("hi there");</script>END_OF_TEXT'
+            'START_OF_TEXT<p>PARAGRAPH_TEXT</p><img src="foo.jpg"/>' \
+            '<iframe src="http://localhost/foo.txt"></iframe><script>alert("hi there");</script>END_OF_TEXT'
 
-          get :show, project_id: subject.project.to_param, id: subject.to_param
+          get :show, params: {project_id: subject.project.to_param, id: subject.to_param}
 
           response.body.to_s[/START_OF_TEXT.*END_OF_TEXT/].must_equal(
-            'START_OF_TEXT<p>PARAGRAPH_TEXT</p><img src="foo.jpg"><iframe src="http://localhost/foo.txt"></iframe>alert("hi there");END_OF_TEXT'
+            'START_OF_TEXT<p>PARAGRAPH_TEXT</p><img src="foo.jpg">' \
+            '<iframe src="http://localhost/foo.txt"></iframe>alert("hi there");END_OF_TEXT'
           )
         end
       end
 
       it "fails with invalid stage" do
         assert_raises ActiveRecord::RecordNotFound do
-          get :show, project_id: 123123, id: subject.to_param
+          get :show, params: {project_id: 123123, id: subject.to_param}
         end
       end
 
       it "fails with invalid stage" do
         assert_raises ActiveRecord::RecordNotFound do
-          get :show, project_id: subject.project.to_param, id: 123123
+          get :show, params: {project_id: subject.project.to_param, id: 123123}
         end
       end
     end
 
-    unauthorized :get, :new, project_id: 1
-    unauthorized :post, :create, project_id: 1
-    unauthorized :get, :edit, project_id: 1, id: 1
-    unauthorized :patch, :update, project_id: 1, id: 1
-    unauthorized :delete, :destroy, project_id: 1, id: 1
+    unauthorized :get, :new, project_id: :foo
+    unauthorized :post, :create, project_id: :foo
+    unauthorized :get, :edit, project_id: :foo, id: 1
+    unauthorized :patch, :update, project_id: :foo, id: 1
+    unauthorized :delete, :destroy, project_id: :foo, id: 1
+    unauthorized :patch, :reorder, project_id: :foo, id: 1
+    unauthorized :get, :clone, project_id: :foo, id: 1
   end
 
-  as_a_admin do
+  as_a_project_admin do
     describe 'GET to #new' do
       describe 'valid' do
-        before { get :new, project_id: subject.project.to_param }
+        before { get :new, params: {project_id: subject.project.to_param } }
 
         it 'renders' do
           assert_template :new
@@ -106,7 +129,7 @@ describe StagesController do
 
       it 'fails for non-existent project' do
         assert_raises ActiveRecord::RecordNotFound do
-          get :new, project_id: 123123
+          get :new, params: {project_id: :foo23123}
         end
       end
     end
@@ -118,14 +141,15 @@ describe StagesController do
         subject { assigns(:stage) }
 
         before do
-          new_command = Command.create!(
-            command: 'test2 command'
-          )
+          new_command = Command.create!(command: 'test2 command')
 
-          post :create, project_id: project.to_param, stage: {
-            name: 'test',
-            command: 'test command',
-            command_ids: [commands(:echo).id, new_command.id]
+          post :create, params: {
+            project_id: project.to_param,
+            stage: {
+              name: 'test',
+              command: 'test command',
+              command_ids: [commands(:echo).id, new_command.id]
+            }
           }
 
           subject.reload
@@ -135,7 +159,7 @@ describe StagesController do
         it 'is created' do
           subject.persisted?.must_equal(true)
           subject.command_ids.must_include(commands(:echo).id)
-          subject.command.must_equal(commands(:echo).command + "\ntest2 command\ntest command")
+          subject.script.must_equal(commands(:echo).command + "\ntest2 command\ntest command")
         end
 
         it 'redirects' do
@@ -145,9 +169,7 @@ describe StagesController do
 
       describe 'invalid attributes' do
         before do
-          post :create, project_id: project.to_param, stage: {
-            name: nil
-          }
+          post :create, params: {project_id: project.to_param, stage: {name: nil}}
         end
 
         it 'renders' do
@@ -157,18 +179,20 @@ describe StagesController do
 
       it "fails with unknown project" do
         assert_raises ActiveRecord::RecordNotFound do
-          post :create, project_id: 123123
+          post :create, params: {project_id: :foo23123}
         end
       end
     end
 
     describe 'GET to #edit' do
       describe 'valid' do
-        before { get :edit, project_id: subject.project.to_param, id: subject.to_param }
+        before { get :edit, params: {project_id: subject.project.to_param, id: subject.to_param } }
 
         it 'renders' do
           assert_template :edit
-          assigns(:environments).wont_be_nil
+
+          assert_select '#stage_slack_webhooks_attributes_0_webhook_url'
+          assert_select '#stage_slack_webhooks_attributes_0_channel'
         end
 
         it 'renders with no environments configured' do
@@ -180,13 +204,13 @@ describe StagesController do
 
       it "fails with unknown project" do
         assert_raises ActiveRecord::RecordNotFound do
-          get :edit, project_id: 123123, id: 1
+          get :edit, params: {project_id: :foo23123, id: 1}
         end
       end
 
       it "fails with unknown stage" do
         assert_raises ActiveRecord::RecordNotFound do
-          get :edit, project_id: subject.project.to_param, id: 123123
+          get :edit, params: {project_id: subject.project.to_param, id: 123123}
         end
       end
     end
@@ -194,20 +218,21 @@ describe StagesController do
     describe 'PATCH to #update' do
       describe 'valid id' do
         before do
-          patch :update, project_id: subject.project.to_param, id: subject.to_param,
-            stage: attributes
+          patch :update, params: {project_id: subject.project.to_param, id: subject.to_param, stage: attributes}
 
           subject.reload
         end
 
         describe 'valid attributes' do
-          let(:attributes) {{
-            command: 'test command',
-            name: 'Hello',
-            dashboard: '<p>Some text</p>',
-            email_committers_on_automated_deploy_failure: true,
-            static_emails_on_automated_deploy_failure: "static@example.com",
-          }}
+          let(:attributes) do
+            {
+              command: 'test command',
+              name: 'Hello',
+              dashboard: '<p>Some text</p>',
+              email_committers_on_automated_deploy_failure: true,
+              static_emails_on_automated_deploy_failure: "static@example.com"
+            }
+          end
 
           it 'updates attributes' do
             subject.name.must_equal('Hello')
@@ -227,7 +252,7 @@ describe StagesController do
         end
 
         describe 'invalid attributes' do
-          let(:attributes) {{ name: nil }}
+          let(:attributes) { { name: nil } }
 
           it 'renders' do
             assert_template :edit
@@ -237,20 +262,20 @@ describe StagesController do
 
       it "does not find with invalid project_id" do
         assert_raises ActiveRecord::RecordNotFound do
-          patch :update, project_id: 123123, id: 1
+          patch :update, params: {project_id: :foo23123, id: 1}
         end
       end
 
       it "does not find with invalid id" do
         assert_raises ActiveRecord::RecordNotFound do
-          patch :update, project_id: subject.project.to_param, id: 123123
+          patch :update, params: {project_id: subject.project.to_param, id: 123123}
         end
       end
     end
 
     describe 'DELETE to #destroy' do
       describe 'valid' do
-        before { delete :destroy, project_id: subject.project.to_param, id: subject.to_param }
+        before { delete :destroy, params: {project_id: subject.project.to_param, id: subject.to_param } }
 
         it 'redirects' do
           assert_redirected_to project_path(subject.project)
@@ -264,22 +289,30 @@ describe StagesController do
 
       it "fails with invalid project" do
         assert_raises ActiveRecord::RecordNotFound do
-          delete :destroy, project_id: 123123, id: 1
+          delete :destroy, params: {project_id: :foo23123, id: 1}
         end
       end
 
       it "fails with invalid stage" do
         assert_raises ActiveRecord::RecordNotFound do
-          delete :destroy, project_id: subject.project.to_param, id: 123123
+          delete :destroy, params: {project_id: subject.project.to_param, id: 123123}
         end
       end
     end
 
     describe 'GET to #clone' do
-      before { get :clone, project_id: subject.project.to_param, id: subject.to_param }
+      before { get :clone, params: {project_id: subject.project.to_param, id: subject.to_param } }
 
       it 'renders :new' do
         assert_template :new
+      end
+    end
+
+    describe 'PATCH to #reorder' do
+      before { patch :reorder, params: {project_id: subject.project.to_param, stage_id: [subject.id] } }
+
+      it 'succeeds' do
+        assert_response :success
       end
     end
   end

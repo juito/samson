@@ -1,7 +1,10 @@
+# frozen_string_literal: true
 require 'docker'
 
 class DockerBuilderService
   DIGEST_SHA_REGEX = /Digest:.*(sha256:[0-9a-f]+)/i
+  DOCKER_REPO_REGEX = /^BUILD DIGEST: (.*@sha256:[0-9a-f]+)/i
+  include ::NewRelic::Agent::MethodTracer
 
   attr_reader :build, :execution
 
@@ -9,66 +12,107 @@ class DockerBuilderService
     @build = build
   end
 
-  def run!(image_name: nil, push: false)
+  def run!(image_name: nil, push: false, tag_as_latest: false)
+    build.docker_build_job.try(:destroy) # if there's an old build job, delete it
+
     job = build.create_docker_job
     build.save!
 
-    job_execution = JobExecution.start_job(build.git_sha, job) do |execution, tmp_dir|
+    job_execution = JobExecution.new(build.git_sha, job) do |execution, tmp_dir|
       @execution = execution
-      @output_buffer = execution.output
+      @output = execution.output
       repository.executor = execution.executor
 
-      if build_image(tmp_dir) && push
-        push_image(image_name)
+      if build.kubernetes_job
+        run_build_image_job(job, image_name, push: push, tag_as_latest: tag_as_latest)
+      elsif build_image(tmp_dir)
+        ret = true
+        ret = push_image(image_name, tag_as_latest: tag_as_latest) if push
+        build.docker_image.remove(force: true) unless ENV["DOCKER_KEEP_BUILT_IMGS"] == "1"
+        ret
       end
     end
 
-    job_execution.on_complete do
-      send_after_notifications
-    end
+    job_execution.on_complete { send_after_notifications }
+
+    JobExecution.start_job(job_execution)
   end
 
-  def build_image(tmp_dir)
-    repository.setup!(tmp_dir, build.git_sha)
+  def run_build_image_job(local_job, image_name, push: false, tag_as_latest: false)
+    k8s_job = Kubernetes::BuildJobExecutor.new(output, job: local_job)
+    docker_ref = docker_image_ref(image_name, build)
 
-    File.write("#{tmp_dir}/REVISION", build.git_sha)
+    success, build_log = k8s_job.execute!(build, project,
+      tag: docker_ref, push: push,
+      registry: registry_credentials, tag_as_latest: tag_as_latest)
 
-    output_buffer.puts("### Running Docker build")
+    build.docker_ref = docker_ref
+    build.docker_repo_digest = nil
 
-    build.docker_image = Docker::Image.build_from_dir(tmp_dir) do |output_chunk|
-      handle_output_chunk(output_chunk)
-    end
-  rescue Docker::Error::DockerError => e
-    # If a docker error is raised, consider that a "failed" job instead of an "errored" job
-    output_buffer.puts("Docker build failed: #{e.message}")
-    nil
-  end
-
-  def push_image(tag)
-    build.docker_ref = tag || build.label.try(:parameterize) || 'latest'
-    build.docker_image.tag(repo: project.docker_repo, tag: build.docker_ref, force: true)
-
-    output_buffer.puts("### Pushing Docker image to #{project.docker_repo}:#{build.docker_ref}")
-
-    build.docker_image.push do |output_chunk|
-      parsed_chunk = handle_output_chunk(output_chunk)
-
-      status = parsed_chunk.fetch('status', '')
-      if (matches = DIGEST_SHA_REGEX.match(status))
-        build.docker_repo_digest = "#{project.docker_repo}@#{matches[1]}"
+    if success
+      build_log.each_line do |line|
+        if (match = line[DOCKER_REPO_REGEX, 1])
+          build.docker_repo_digest = match
+        end
       end
+    end
+    if build.docker_repo_digest.blank?
+      output.puts "### Failed to get the image digest"
     end
 
     build.save!
-
-    build
-  rescue Docker::Error::DockerError => e
-    output_buffer.puts("Docker push failed: #{e.message}\n")
-    nil
   end
 
-  def output_buffer
-    @output_buffer ||= OutputBuffer.new
+  def build_image(tmp_dir)
+    Samson::Hooks.fire(:before_docker_build, tmp_dir, build, output)
+
+    File.write("#{tmp_dir}/REVISION", build.git_sha)
+
+    output.puts("### Running Docker build")
+
+    build.docker_image =
+      Docker::Image.build_from_dir(tmp_dir, {}, Docker.connection, registry_credentials) do |chunk|
+        output.write_docker_chunk(chunk)
+      end
+    output.puts('### Docker build complete')
+  rescue Docker::Error::UnexpectedResponseError
+    # If the docker library isn't able to find an image id, it returns the
+    # entire output of the "docker build" command, which we've already captured
+    output.puts("Docker build failed (image id not found in response)")
+    nil
+  rescue Docker::Error::DockerError => e
+    # If a docker error is raised, consider that a "failed" job instead of an "errored" job
+    output.puts("Docker build failed: #{e.message}")
+    nil
+  end
+  add_method_tracer :build_image
+
+  def push_image(tag, tag_as_latest: false)
+    build.docker_ref = docker_image_ref(tag, build)
+    build.docker_repo_digest = nil
+    output.puts("### Tagging and pushing Docker image to #{project.docker_repo}:#{build.docker_ref}")
+
+    build.docker_image.tag(repo: project.docker_repo, tag: build.docker_ref, force: true)
+
+    build.docker_image.push(registry_credentials) do |chunk|
+      parsed_chunk = output.write_docker_chunk(chunk)
+      if (status = parsed_chunk['status']) && sha = status[DIGEST_SHA_REGEX, 1]
+        build.docker_repo_digest = "#{project.docker_repo}@#{sha}"
+      end
+    end
+
+    push_latest if tag_as_latest && build.docker_ref != 'latest'
+
+    build.save!
+    build
+  rescue Docker::Error::DockerError => e
+    output.puts("Docker push failed: #{e.message}\n")
+    nil
+  end
+  add_method_tracer :push_image
+
+  def output
+    @output ||= OutputBuffer.new
   end
 
   private
@@ -81,18 +125,30 @@ class DockerBuilderService
     @build.project
   end
 
-  def handle_output_chunk(chunk)
-    parsed_chunk = JSON.parse(chunk)
-    values = parsed_chunk.each_with_object([]) do |(k,v), arr|
-      arr << "#{k}: #{v}" if v.present?
-    end
+  def registry_credentials
+    return nil unless ENV['DOCKER_REGISTRY'].present?
+    {
+      username: ENV['DOCKER_REGISTRY_USER'],
+      password: ENV['DOCKER_REGISTRY_PASS'],
+      email: ENV['DOCKER_REGISTRY_EMAIL'],
+      serveraddress: ENV['DOCKER_REGISTRY']
+    }
+  end
 
-    output_buffer.puts values.join(' | ')
-    parsed_chunk
+  def docker_image_ref(image_name, build)
+    image_name.presence || build.label.try(:parameterize).presence || 'latest'
+  end
+
+  def push_latest
+    output.puts "### Pushing the 'latest' tag for this image"
+    build.docker_image.tag(repo: project.docker_repo, tag: 'latest', force: true)
+    build.docker_image.push(registry_credentials, tag: 'latest', force: true) do |chunk|
+      output.write_docker_chunk(chunk)
+    end
   end
 
   def send_after_notifications
     Samson::Hooks.fire(:after_docker_build, build)
-    SseRailsEngine.send_event('builds', { type: 'finish', build: BuildSerializer.new(build, root: nil) })
+    SseRailsEngine.send_event('builds', type: 'finish', build: BuildSerializer.new(build, root: nil))
   end
 end

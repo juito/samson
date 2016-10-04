@@ -1,4 +1,5 @@
-class AddSourceToWebhook < ActiveRecord::Migration
+# frozen_string_literal: true
+class AddSourceToWebhook < ActiveRecord::Migration[4.2]
   def up
     add_column :webhooks, :source, :string, null: false, default: 'any_ci'
     change_column_default :webhooks, :source, nil

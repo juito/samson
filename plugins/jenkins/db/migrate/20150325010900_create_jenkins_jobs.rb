@@ -1,4 +1,5 @@
-class CreateJenkinsJobs < ActiveRecord::Migration
+# frozen_string_literal: true
+class CreateJenkinsJobs < ActiveRecord::Migration[4.2]
   def change
     create_table :jenkins_jobs do |t|
       t.integer :jenkins_job_id, index: true, null: false

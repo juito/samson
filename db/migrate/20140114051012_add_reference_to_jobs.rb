@@ -1,4 +1,5 @@
-class AddReferenceToJobs < ActiveRecord::Migration
+# frozen_string_literal: true
+class AddReferenceToJobs < ActiveRecord::Migration[4.2]
   def change
     change_table :jobs do |t|
       t.string :commit

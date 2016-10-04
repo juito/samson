@@ -1,10 +1,14 @@
+# frozen_string_literal: true
 class Admin::EnvironmentsController < ApplicationController
-  before_action :authorize_admin!
-  before_action :authorize_super_admin!, only: [ :create, :new, :edit, :update, :destroy ]
+  before_action :authorize_admin!, except: [:index]
+  before_action :authorize_super_admin!, only: [:create, :new, :edit, :update, :destroy]
   before_action :environment, only: [:edit, :update, :destroy]
 
   def index
-    @environments = Environment.all
+    respond_to do |format|
+      format.html
+      format.json { render json: Environment.all }
+    end
   end
 
   def new
@@ -18,7 +22,6 @@ class Admin::EnvironmentsController < ApplicationController
       flash[:notice] = "Successfully saved environment: #{@environment.name}"
       redirect_to action: 'index'
     else
-      flash[:error] = @environment.errors.full_messages
       render 'edit'
     end
   end
@@ -28,7 +31,6 @@ class Admin::EnvironmentsController < ApplicationController
       flash[:notice] = "Successfully saved environment: #{environment.name}"
       redirect_to action: 'index'
     else
-      flash[:error] = environment.errors.full_messages
       render 'edit'
     end
   end
@@ -42,7 +44,7 @@ class Admin::EnvironmentsController < ApplicationController
   private
 
   def env_params
-    params.require(:environment).permit(:name, :is_production)
+    params.require(:environment).permit(:name, :production)
   end
 
   def environment

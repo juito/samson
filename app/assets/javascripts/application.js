@@ -12,8 +12,18 @@
 //
 //= require jquery
 //= require jquery-ujs
+//= require jquery-cookie
+//= require jquery-ui
+//= require datatables.net
+//= require datatables.net-bs
+//= require datatables.net-fixedcolumns
 //= require angular
 //= require angular-rails-templates
+//= require angular-ui-router
+//= require angular-ui-bootstrap-bower
+//= require spin
+//= require angular-spinner
+//= require angular-truncate-2
 //= require underscore
 //= require moment
 //= require bootstrap/alert
@@ -22,12 +32,13 @@
 //= require bootstrap/tooltip
 //= require bootstrap/popover
 //= require bootstrap-select
-//= require jquery-ui
 //= require x-editable/dist/bootstrap3-editable/js/bootstrap-editable
+//= require message-center
 //= require rickshaw/vendor/d3.min
 //= require rickshaw
 //= require vis
 //= require app
-//= require config
+//= require underscore_mixins
+//= require jstimezonedetect
 //= require_tree .
 //= require_tree ../templates

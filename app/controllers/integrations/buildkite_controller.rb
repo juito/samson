@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 class Integrations::BuildkiteController < Integrations::BaseController
   protected
 
@@ -10,7 +11,7 @@ class Integrations::BuildkiteController < Integrations::BaseController
   end
 
   def no_skip_token_present?
-    !contains_skip_token?(build_param[:message])
+    !contains_skip_token?(message)
   end
 
   def commit
@@ -23,5 +24,14 @@ class Integrations::BuildkiteController < Integrations::BaseController
 
   def build_param
     @build_param ||= params.fetch(:build, { })
+  end
+
+  def message
+    build_param[:message]
+  end
+
+  def release_params
+    extra_params = Samson::Hooks.fire(:buildkite_release_params, project, build_param)
+    super.merge(Hash[*extra_params.flatten])
   end
 end

@@ -16,27 +16,34 @@
 
     <%= render "locks/button", lock: @stage.lock %>
 
-    <% if current_user.is_admin? %>
+    <% if admin_for_project? %>
       <%= link_to "Edit", edit_project_stage_path(@project, @stage), class: "btn btn-default" %>
       <%= link_to_delete_button([@project, @stage]) %>
     <% end %>
-  </div>
 
-  <% if datadog_monitors = @stage.datadog_monitors.presence %>
-    <h2>Datadog Monitors</h2>
-    <% datadog_monitors.each do |monitor| %>
-      <% label = {pass: "success", fail: "danger"}[monitor.status] || "warning" %>
-      <span class="label label-<%= label %>"><%= monitor.name %></span>
-    <% end %>
-  <% end %>
+    <div class="pull-right">
+      <%= link_to_history @stage %>
+    </div>
+  </div>
 
   <% if @stage.dashboard.present? %>
     <h2>Dashboard</h2>
     <div><%= sanitize @stage.dashboard, tags: Loofah::HTML5::WhiteList::ACCEPTABLE_ELEMENTS + %w[iframe] %></div>
   <% end %>
 
-  <h2>Command</h2>
-  <pre class="pre-command"><%= @stage.command %></pre>
+  <%= Samson::Hooks.render_views(:stage_show, self) %>
+
+  <div id="script-section">
+    <h2>Script</h2>
+    <pre class="pre-command"><%= "set -ex\n" + @stage.script %></pre>
+  </div>
+
+  <% if groups = @stage.deploy_groups.sort_by(&:natural_order).to_a.presence %>
+    <h2>Deploy groups</h2>
+    <% groups.each do |group| %>
+      <%= link_to group.name, group %>
+    <% end %>
+  <% end %>
 
   <h2>Recent deploys</h2>
   <table class="table">
@@ -44,6 +51,9 @@
       <tr>
         <th>When</th>
         <th>Who</th>
+        <% unless @stage %>
+          <th>Stage</th>
+        <% end %>
         <th>Status</th>
       </tr>
     </thead>

@@ -1,80 +1,77 @@
+# frozen_string_literal: true
 require_relative '../test_helper'
+
+SingleCov.covered!
 
 describe MacrosController do
   let(:project) { projects(:test) }
-  let(:deployer) { users(:deployer) }
   let(:macro) { macros(:test) }
-  let(:macro_service) { stub(execute!: nil) }
-  let(:execute_called) { [] }
-  let(:job) { Job.create!(commit: macro.reference, command: macro.command, project: project, user: deployer) }
-
-  setup do
-    MacroService.stubs(:new).with(project, deployer).returns(macro_service)
-    macro_service.stubs(:execute!).capture(execute_called).returns(job)
-  end
+  let(:job) { Job.create!(commit: macro.reference, command: macro.script, project: project, user: user) }
 
   as_a_viewer do
-    unauthorized :get, :index, project_id: 1
-    unauthorized :get, :new, project_id: 1
-    unauthorized :get, :edit, project_id: 1, id: 1
-    unauthorized :post, :create, project_id: 1
-    unauthorized :post, :execute, project_id: 1, id: 1
-    unauthorized :put, :update, project_id: 1, id: 1
-    unauthorized :delete, :destroy, project_id: 1, id: 1
+    unauthorized :get, :index, project_id: :foo
+    unauthorized :get, :new, project_id: :foo
+    unauthorized :get, :edit, project_id: :foo, id: 1
+    unauthorized :post, :create, project_id: :foo
+    unauthorized :post, :execute, project_id: :foo, id: 1
+    unauthorized :put, :update, project_id: :foo, id: 1
+    unauthorized :delete, :destroy, project_id: :foo, id: 1
   end
 
-  as_a_deployer do
-    describe "a GET to :index" do
-      setup { get :index, project_id: project.to_param }
+  as_a_project_deployer do
+    describe "#index" do
+      before { get :index, params: {project_id: project.to_param } }
 
       it "renders the template" do
         assert_template :index
       end
     end
 
-    describe 'a POST to #execute' do
-      describe 'with a macro' do
-        setup do
-          JobExecution.stubs(:start_job).with(macro.reference, job)
-          post :execute, project_id: project.to_param, id: macro.id
+    describe '#execute' do
+      it "executes a macro" do
+        JobExecution.expects(:start_job)
+        assert_difference 'Job.count' do
+          post :execute, params: {project_id: project.to_param, id: macro.id}
         end
+        assert_redirected_to project_job_path(project, Job.last)
+      end
 
-        it "redirects to the job path" do
-          assert_redirected_to project_job_path(project, job)
+      it "fails execute an invalid macro" do
+        JobExecution.expects(:start_job).never
+        Job.any_instance.expects(:save).returns(false)
+        refute_difference 'Job.count' do
+          post :execute, params: {project_id: project.to_param, id: macro.id}
         end
-
-        it "creates a job" do
-          assert_equal [[macro]], execute_called
-        end
+        assert_redirected_to project_macros_path(project)
       end
 
       it 'fails for non-existent macro' do
         assert_raises ActiveRecord::RecordNotFound do
-          post :execute, project_id: project.to_param, id: 123123123
+          post :execute, params: {project_id: project.to_param, id: 123123123}
         end
       end
     end
 
-    unauthorized :get, :new, project_id: 1
-    unauthorized :get, :edit, project_id: 1, id: 1
-    unauthorized :post, :create, project_id: 1
-    unauthorized :put, :update, project_id: 1, id: 1
-    unauthorized :delete, :destroy, project_id: 1, id: 1
+    unauthorized :get, :new, project_id: :foo
+    unauthorized :get, :edit, project_id: :foo, id: 1
+    unauthorized :post, :create, project_id: :foo
+    unauthorized :put, :update, project_id: :foo, id: 1
+    unauthorized :delete, :destroy, project_id: :foo, id: 1
   end
 
-  as_a_admin do
-    describe 'a GET to #new' do
-      setup { get :new, project_id: project.to_param }
+  as_a_project_admin do
+    describe '#new' do
+      before { get :new, params: {project_id: project.to_param } }
 
       it 'renders the template' do
         assert_template :new
       end
     end
 
-    describe 'a GET to #edit' do
+    describe '#edit' do
       describe 'with a macro' do
-        setup do
-          get :edit, project_id: project.to_param, id: macro.id
+        before do
+          get :edit, params: {project_id: project.to_param, id: macro.id}
         end
 
         it 'renders the template' do
@@ -84,18 +81,21 @@ describe MacrosController do
 
       it 'fails for non-existent macro' do
         assert_raises ActiveRecord::RecordNotFound do
-          get :edit, project_id: project.to_param, id: 123123
+          get :edit, params: {project_id: project.to_param, id: 123123}
         end
       end
     end
 
-    describe 'a POST to #create' do
+    describe '#create' do
       describe 'with a valid macro' do
-        setup do
-          post :create, project_id: project.to_param, macro: {
-            name: 'Testing',
-            reference: 'master',
-            command: '/bin/true'
+        before do
+          post :create, params: {
+            project_id: project.to_param,
+            macro: {
+              name: 'Testing',
+              reference: 'master',
+              command: '/bin/true'
+            }
           }
         end
 
@@ -105,10 +105,8 @@ describe MacrosController do
       end
 
       describe 'with an invalid macro' do
-        setup do
-          post :create, project_id: project.to_param, macro: {
-            name: 'Testing'
-          }
+        before do
+          post :create, params: {project_id: project.to_param, macro: {name: 'Testing'}}
         end
 
         it 'renders the form' do
@@ -117,12 +115,10 @@ describe MacrosController do
       end
     end
 
-    describe 'a PUT to #update' do
+    describe '#update' do
       describe 'with a valid macro' do
-        setup do
-          post :update, project_id: project.to_param, id: macro.id, macro: {
-            name: 'New'
-          }
+        before do
+          post :update, params: {project_id: project.to_param, id: macro.id, macro: {name: 'New'}}
         end
 
         it 'updates the macro' do
@@ -135,10 +131,8 @@ describe MacrosController do
       end
 
       describe 'with an invalid macro' do
-        setup do
-          post :update, project_id: project.to_param, id: macro.id, macro: {
-            name: ''
-          }
+        before do
+          post :update, params: {project_id: project.to_param, id: macro.id, macro: {name: ''}}
         end
 
         it 'renders the correct template' do
@@ -147,39 +141,9 @@ describe MacrosController do
       end
     end
 
-    describe 'a DELETE to #destroy' do
-      describe 'with the macro creator' do
-        setup do
-          delete :destroy, project_id: project.to_param, id: macro.id
-        end
-
-        it 'soft deletes the macro' do
-          lambda { project.macros.find(macro.id) }.must_raise(ActiveRecord::RecordNotFound)
-          Macro.unscoped.find(macro.id).must_equal(macro)
-        end
-
-        it 'redirects properly' do
-          assert_redirected_to project_macros_path(project)
-        end
-      end
-
-      describe 'as someone else' do
-        setup do
-          macro.update_attributes!(user: users(:deployer))
-          delete :destroy, project_id: project.to_param, id: macro.id
-        end
-
-        it 'is unauthorized' do
-          assert_response :unauthorized
-        end
-      end
-    end
-  end
-
-  as_a_super_admin do
-    describe 'a DELETE to #destroy' do
-      setup do
-        delete :destroy, project_id: project.to_param, id: macro.id
+    describe '#destroy' do
+      before do
+        delete :destroy, params: {project_id: project.to_param, id: macro.id}
       end
 
       it 'soft deletes the macro' do

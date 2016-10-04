@@ -2,14 +2,13 @@
 
 <%= render 'projects/header', project: @project, tab: "releases" %>
 
-<% cache [@project, @releases.current_page] do %>
+<% cache [@project, @releases.current_page, deployer_for_project?] do %>
   <section class="clearfix tabs">
-
-    <p class="pull-right">
-      <%= link_to "Create release manually", new_project_release_path(@project), class: "btn btn-default" %>
-    </p>
-
     <% if @releases.any? %>
+      <p class="pull-right">
+        <%= link_to "Create release manually", new_project_release_path(@project), class: "btn btn-default" %>
+      </p>
+
       <table class="table table-hover release-list">
         <thead>
           <tr>
@@ -21,14 +20,20 @@
         </thead>
 
         <tbody>
-          <%= render @releases %>
+          <%= static_render @releases %>
         </tbody>
       </table>
 
       <%= paginate @releases %>
+    <% elsif !@project.release_branch.present? %>
+      <div class="alert alert-warning">
+        <p>Configure a <%= link_to "release branch", edit_project_path(@project, anchor: "project_release_branch") %> to automatically create releases whenever a branch is pushed to.</p>
+      </div>
     <% else %>
-      <p>There haven't been any releases yet.</p>
+      <div class="alert alert-warning">
+        <p>No release created from release branch <%= @project.release_branch %>.</p>
+        <p>Add a webhook to samson from your CI to trigger releases on green builds or from your Code hoster to get releases on merge.</p>
+      </div>
     <% end %>
-
   </section>
 <% end %>

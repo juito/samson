@@ -1,4 +1,5 @@
-class AddPermalinkToStages < ActiveRecord::Migration
+# frozen_string_literal: true
+class AddPermalinkToStages < ActiveRecord::Migration[4.2]
   def change
     add_column :stages, :permalink, :string
     add_index :stages, :permalink, unique: true, length: 191

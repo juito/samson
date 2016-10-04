@@ -1,8 +1,24 @@
+# frozen_string_literal: true
 class Admin::CommandsController < ApplicationController
-  before_action :authorize_admin!
+  include CurrentProject
+
+  before_action :find_command, only: [:update, :edit]
+  before_action :authorize_project_admin!, only: [:update, :edit]
+  before_action :authorize_admin!, except: [:update, :edit]
 
   def index
-    @commands = Command.order('project_id').page(params[:page])
+    @commands = Command.order(:project_id).page(params[:page])
+    if search = params[:search]
+      if query = search[:query].presence
+        query = ActiveRecord::Base.send(:sanitize_sql_like, query)
+        @commands = @commands.where('command like ?', "%#{query}%")
+      end
+
+      if project_id = search[:project_id].presence
+        project_id = nil if project_id == 'global'
+        @commands = @commands.where(project_id: project_id)
+      end
+    end
   end
 
   def new
@@ -14,27 +30,18 @@ class Admin::CommandsController < ApplicationController
     @command = Command.create(command_params)
 
     if @command.persisted?
-      flash[:notice] = 'Command created.'
-      redirect_to admin_commands_path
+      successful_response 'Command created.'
     else
-      flash[:error] = 'Command failure.'
       render :edit
     end
   end
 
-  def edit
-    @command = Command.find(params[:id])
-  end
-
   def update
-    @command = Command.find(params[:id])
-
     if @command.update_attributes(command_params)
       successful_response('Command updated.')
     else
       respond_to do |format|
         format.html do
-          flash[:error] = 'Command failure.'
           render :edit
         end
 
@@ -45,7 +52,6 @@ class Admin::CommandsController < ApplicationController
 
   def destroy
     Command.destroy(params[:id])
-
     successful_response('Command removed.')
   end
 
@@ -64,5 +70,13 @@ class Admin::CommandsController < ApplicationController
 
       format.json { render json: {} }
     end
+  end
+
+  def find_command
+    @command = Command.find(params[:id])
+  end
+
+  def current_project
+    @command.project
   end
 end

@@ -1,22 +1,57 @@
+# frozen_string_literal: true
 require 'soft_deletion'
 require 'digest/md5'
 
 class User < ActiveRecord::Base
+  include Searchable
+  include HasRole
+
+  TIME_FORMATS = ['local', 'utc', 'relative'].freeze
+
   has_soft_deletion default_scope: true
+
+  has_paper_trail skip: [:updated_at, :created_at, :token]
 
   has_many :commands
   has_many :stars
-  has_many :starred_projects, through: :stars, source: :project
   has_many :locks, dependent: :destroy
+  has_many :user_project_roles, dependent: :destroy
+  has_many :projects, through: :user_project_roles
+  has_many :csv_exports, dependent: :destroy
 
   validates :role_id, inclusion: { in: Role.all.map(&:id) }
 
   before_create :set_token
+  validates :time_format, inclusion: { in: TIME_FORMATS }
 
-  scope :search, ->(query) { where("name like ? or email like ?", "%#{query}%", "%#{query}%") }
+  scope :search, ->(query) {
+    return self if query.blank?
+    query = ActiveRecord::Base.send(:sanitize_sql_like, query)
+    where("name LIKE ? OR email LIKE ?", "%#{query}%", "%#{query}%")
+  }
+  scope :with_role, -> (role_id, project_id) {
+    joins("LEFT OUTER JOIN user_project_roles ON users.id = user_project_roles.user_id AND user_project_roles.project_id = #{project_id.to_i}"). # rubocop:disable Metrics/LineLength
+      where('users.role_id >= ? OR user_project_roles.role_id >= ?', role_id, role_id)
+  }
 
   def starred_project?(project)
-    starred_projects.include?(project)
+    starred_project_ids.include?(project.id)
+  end
+
+  def starred_project_ids
+    Rails.cache.fetch([:starred_projects_ids, id]) do
+      stars.pluck(:project_id)
+    end
+  end
+
+  # returns a scope
+  def administrated_projects
+    scope = Project.order(:name)
+    unless admin?
+      allowed = user_project_roles.where(role_id: Role::ADMIN.id).pluck(:project_id)
+      scope = scope.where(id: allowed)
+    end
+    scope
   end
 
   def self.create_or_update_from_hash(hash)
@@ -25,7 +60,7 @@ class User < ActiveRecord::Base
     # attributes are always a string hash
     attributes = user.attributes.merge(hash.stringify_keys) do |key, old, new|
       if key == 'role_id'
-        if !User.exists?
+        if !User.exists? # first user will be the super admin
           Role::SUPER_ADMIN.id
         elsif new && (user.new_record? || new >= old)
           new
@@ -55,17 +90,29 @@ class User < ActiveRecord::Base
     "https://www.gravatar.com/avatar/#{md5}"
   end
 
-  Role.all.each do |role|
-    define_method "is_#{role.name}?" do
-      role_id >= role.id
-    end
+  def admin_for?(project)
+    admin? || !!project_role_for(project).try(:admin?)
   end
 
-  def role
-    Role.find(role_id)
+  def deployer_for?(project)
+    deployer? || !!project_role_for(project).try(:deployer?)
+  end
+
+  def project_role_for(project)
+    user_project_roles.find_by(project: project)
+  end
+
+  def record_project_role_change
+    record_update true
   end
 
   private
+
+  # overwrites papertrail to record script
+  def object_attrs_for_paper_trail(attributes)
+    roles = user_project_roles.map { |upr| [upr.project.permalink, upr.role_id] }.to_h
+    super(attributes.merge('project_roles' => roles))
+  end
 
   def set_token
     self.token = SecureRandom.hex

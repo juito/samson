@@ -1,7 +1,10 @@
-//= require typeahead
+//= require typeahead.js.js
 //= require changesets
+//= require jquery-mentions-input/jquery.elastic.source
+//= require jquery-mentions-input/jquery.mentionsInput
 
-var following = true;
+var following = true; // shared with stream.js
+
 $(function () {
   // Shows confirmation dropdown using Github comparison
   var changesetLoaded = false,
@@ -12,7 +15,8 @@ $(function () {
       $submit = $form.find('input[type=submit]'),
       $reference = $("#deploy_reference"),
       $ref_problem_list = $("#ref-problem-list"),
-      $ref_status_label = $("#ref-problem-warning");
+      $ref_status_label = $("#ref-problem-warning"),
+      $messages = $("#messages");
 
   $("#deploy-tabs a[data-type=github]").click(function (e) {
       e.preventDefault();
@@ -41,6 +45,16 @@ $(function () {
           }
         });
       }
+  });
+
+  // navigate to the correct tab if we opened this page with a hash/fragment/anchor
+  if(window.location.hash !== "") {
+    $('.nav-tabs a[href="' + window.location.hash + '"]').trigger('click');
+  }
+
+  // when clicking a tab with a hash href, apply that hash to the location to make url copy-pasting possible
+  $('.nav-tabs a[href^="#"]').click(function(){
+    window.location.hash = this.hash;
   });
 
   var prefetchUrl = $reference.data("prefetchUrl");
@@ -110,6 +124,11 @@ $(function () {
             $tag_form_group.addClass("has-error");
             show_status_problems(data.status_list);
             break;
+          case null:
+            $ref_status_label.removeClass("hidden");
+            $tag_form_group.addClass("has-error");
+            show_status_problems([{"state": "Tag or SHA", description: "'" + ref + "' does not exist"}]);
+            break;
         }
       }
     });
@@ -143,31 +162,41 @@ $(function () {
     }
   });
 
+  function showDeployConfirmationTab($this) {
+    var $navTabs = $this.find("#deploy-confirmation .nav-tabs"),
+        hasActivePane = $this.find(".tab-pane.active").length === 0;
+
+    // We need to switch to another tab and then switch back in order for
+    // the plugin to detect that the DOM node has been replaced.
+    $navTabs.find("a").tab("show");
+
+    // If there is no active pane defined, show first pane
+    if (hasActivePane) {
+      $navTabs.find("a:first").tab("show");
+    }
+  }
+
   $form.submit(function(event) {
-    var $selected_stage = $("#deploy_stage_id option:selected"),
-        $this = $(this),
-        $submit = $this.find('button[type=submit]');
+    var $this = $(this);
 
     if(!confirmed && $this.data('confirmation')) {
       toggleConfirmed();
       $("#deploy-confirmation").show();
-      $("#deploy-confirmation .nav-tabs a:first").tab("show");
+
+      showDeployConfirmationTab($this);
+
       $container.empty();
       $container.append($placeholderPanes);
-
 
       $.ajax({
         method: "POST",
         url: $this.data("confirm-url"),
         data: $this.serialize(),
-        success: function(data, status, xhr) {
+        success: function(data) {
           $placeholderPanes.detach();
           $container.append(data);
 
-          // We need to switch to another tab and then switch back in order for
-          // the plugin to detect that the DOM node has been replaced.
-          $('#deploy-confirmation .nav-tabs a').tab("show");
-          $('#deploy-confirmation .nav-tabs a:first').tab("show");
+          showDeployConfirmationTab($this);
         }
       });
 
@@ -176,15 +205,14 @@ $(function () {
   });
 
   function shrinkOutput() {
-    $("#messages").css("max-height", 550);
+    $messages.css("max-height", 550);
   }
 
-  $("#output-follow").click(function(event) {
+  $("#output-follow").click(function() {
     following = true;
 
     shrinkOutput();
 
-    var $messages = $("#messages");
     $messages.scrollTop($messages.prop("scrollHeight"));
 
     $("#output-options > button, #output-grow-toggle").removeClass("active");
@@ -192,10 +220,10 @@ $(function () {
   });
 
   function growOutput() {
-    $("#messages").css("max-height", "none");
+    $messages.css("max-height", "none");
   }
 
-  $("#output-grow-toggle").click(function(event) {
+  $("#output-grow-toggle").click(function() {
     var $self = $(this);
 
     if($self.hasClass("active")) {
@@ -207,7 +235,7 @@ $(function () {
     }
   });
 
-  $("#output-grow").click(function(event) {
+  $("#output-grow").click(function() {
     growOutput();
 
     $("#output-options > button").removeClass("active");
@@ -215,7 +243,7 @@ $(function () {
     $("#output-grow-toggle").addClass("active");
   });
 
-  $("#output-steady").click(function(event) {
+  $("#output-steady").click(function() {
     following = false;
 
     shrinkOutput();
@@ -225,7 +253,7 @@ $(function () {
   });
 
   // If there are messages being streamed, then show the output and hide buddy check
-  $('#messages').bind('contentchanged', function(){
+  $messages.bind('contentchanged', function() {
     var $output = $('#output');
     if ($output.find('.output').hasClass("hidden") ){
       $output.find('.output').removeClass('hidden');
@@ -233,8 +261,111 @@ $(function () {
     }
   });
 
+  // when user scrolls all the way down, start following
+  // when user scrolls up, stop following since it would cause jumping
+  // (adds 30 px wiggle room since the math does not quiet add up)
+  $messages.scroll(function() {
+    var position = $messages.prop("scrollHeight") - $messages.scrollTop() - $messages.height() - 30;
+    if(position > 0 && following) {
+      $("#output-steady").click();
+    } else if (position < 0 && !following) {
+      $("#output-follow").click();
+    }
+  });
+
+  (function() {
+    var HASH_REGEX = /^#L(\d+)(?:-L(\d+))?$/;
+    var $highlightedLines;
+    var LINES_SELECTOR = '#messages span';
+
+    function linesFromHash() {
+      var result = HASH_REGEX.exec(window.location.hash);
+      if (result === null) {
+        return [];
+      } else {
+        return result.slice(1);
+      }
+    }
+
+    function addHighlight(start, end) {
+      if (!start) {
+        return;
+      }
+      start = Number(start) - 1;
+      if (end) {
+        end = Number(end);
+      } else {
+        end = start + 1;
+      }
+      $highlightedLines = $(LINES_SELECTOR).slice(start, end).addClass('highlighted');
+    }
+
+    function removeHighlight() {
+      if ($highlightedLines) {
+        $highlightedLines.removeClass('highlighted');
+      }
+    }
+
+    function highlightAndScroll() {
+      highlight();
+      scroll();
+    }
+
+    function scroll() {
+      if ($highlightedLines) {
+        $highlightedLines.get(0).scrollIntoView(true);
+      }
+    }
+
+    function highlight() {
+      removeHighlight();
+      var nextLines = linesFromHash();
+      addHighlight.apply(this, nextLines);
+    }
+
+    function indexOfLine() {
+      // the jQuery map passes an index before the element
+      var line = arguments[arguments.length - 1];
+      return $(line).index(LINES_SELECTOR) + 1;
+    }
+
+    $('#messages').on('click', 'span', function(event) {
+      event.preventDefault();
+      var clickedNumber = indexOfLine($(event.currentTarget));
+      var shift = event.shiftKey;
+      if (shift && $highlightedLines.length) {
+        var requestedLines = $highlightedLines.map(indexOfLine);
+        requestedLines.push(clickedNumber);
+        requestedLines = requestedLines.sort(function(a, b) {
+          return a - b;
+        });
+        var end = requestedLines.length - 1;
+        window.location.hash = 'L' + requestedLines[0] + '-L' + requestedLines[end];
+      } else {
+        window.location.hash = 'L' + clickedNumber;
+      }
+      highlight();
+    });
+
+    highlightAndScroll();
+  }());
+
+  $('[data-toggle="tooltip"]').tooltip();
 });
 
 function toggleOutputToolbar() {
   $('.only-active, .only-finished').toggle();
+}
+
+function waitUntilEnabled(path) {
+  $.ajax({
+    url: path,
+    success: function(data, status, xhr) {
+      if(xhr.status == 204) {
+        window.location.reload();
+      }
+    }
+  });
+
+  setTimeout(function() { waitUntilEnabled(path); }, 5000);
 }

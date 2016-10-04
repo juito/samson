@@ -1,14 +1,23 @@
+# frozen_string_literal: true
 class Job < ActiveRecord::Base
   belongs_to :project
-  belongs_to :user
+  belongs_to :user, -> { unscope(where: 'deleted_at') }
 
   has_one :deploy
 
-  after_update { deploy.touch if deploy }
+  # Used by status_panel
+  alias_attribute :start_time, :created_at
+
+  after_update { deploy&.touch }
 
   validate :validate_globally_unlocked
 
   ACTIVE_STATUSES = %w[pending running cancelling].freeze
+  VALID_STATUSES = ACTIVE_STATUSES + %w[failed errored succeeded cancelled].freeze
+
+  def self.valid_status?(status)
+    VALID_STATUSES.include?(status)
+  end
 
   def self.non_deploy
     includes(:deploy).where(deploys: { id: nil })
@@ -35,7 +44,7 @@ class Job < ActiveRecord::Base
   end
 
   def can_be_stopped_by?(user)
-    started_by?(user) || user.is_admin?
+    started_by?(user) || user.admin? || user.admin_for?(project)
   end
 
   def commands
@@ -43,14 +52,17 @@ class Job < ActiveRecord::Base
   end
 
   def stop!
-    status!("cancelling")
-    execution.try(:stop!)
-    status!("cancelled")
+    if execution
+      cancelling!
+      execution.stop!
+    else
+      cancelled!
+    end
   end
 
-  %w{pending running succeeded cancelling cancelled failed errored}.each do |status|
+  %w[pending running succeeded cancelling cancelled failed errored].each do |status|
     define_method "#{status}?" do
-      self.status == status
+      self.status == status # rubocop:disable Style/RedundantSelf
     end
   end
 
@@ -70,12 +82,20 @@ class Job < ActiveRecord::Base
     status!("errored")
   end
 
+  def cancelling!
+    status!("cancelling")
+  end
+
+  def cancelled!
+    status!("cancelled")
+  end
+
   def finished?
-    succeeded? || failed? || errored? || cancelled?
+    !ACTIVE_STATUSES.include?(status)
   end
 
   def active?
-    pending? || running? || cancelling?
+    ACTIVE_STATUSES.include?(status)
   end
 
   def output
@@ -90,16 +110,18 @@ class Job < ActiveRecord::Base
     update_columns(commit: commit, tag: tag)
   end
 
-  def full_url
-    deploy.try(:full_url) || AppRoutes.url_helpers.project_job_url(project, self)
+  def url
+    deploy.try(:url) || Rails.application.routes.url_helpers.project_job_url(project, self)
+  end
+
+  def pid
+    execution.try :pid
   end
 
   private
 
   def validate_globally_unlocked
-    if Lock.global.exists?
-      errors.add(:project, 'is locked')
-    end
+    errors.add(:project, 'is locked') if Lock.global.exists?
   end
 
   def execution

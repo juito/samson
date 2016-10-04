@@ -1,20 +1,24 @@
+# frozen_string_literal: true
 class Deploy < ActiveRecord::Base
   has_soft_deletion default_scope: true
 
   belongs_to :stage, touch: true
   belongs_to :build
   belongs_to :job
-  belongs_to :buddy, class_name: 'User'
+  belongs_to :buddy, -> { unscope(where: "deleted_at") }, class_name: 'User'
 
   default_scope { order(created_at: :desc, id: :desc) }
 
   validates_presence_of :reference
-  validate :validate_stage_is_deployable, on: :create
+  validate :validate_stage_is_unlocked, on: :create
+  validate :validate_stage_uses_deploy_groups_properly, on: :create
 
   delegate :started_by?, :can_be_stopped_by?, :stop!, :status, :user, :output, to: :job
   delegate :active?, :pending?, :running?, :cancelling?, :cancelled?, :succeeded?, to: :job
   delegate :finished?, :errored?, :failed?, to: :job
   delegate :production?, :project, to: :stage
+
+  before_validation :trim_reference
 
   def cache_key
     [super, commit]
@@ -37,7 +41,7 @@ class Deploy < ActiveRecord::Base
   end
 
   def short_reference
-    if reference =~ /\A[0-9a-f]{40}\Z/
+    if reference =~ Build::SHA1_REGEX
       reference[0...7]
     else
       reference
@@ -61,15 +65,15 @@ class Deploy < ActiveRecord::Base
   end
 
   def buddy
-    if buddy_id
-      super || NullUser.new(buddy_id)
-    else
-      nil
-    end
+    super || NullUser.new(buddy_id) if buddy_id
   end
 
   def bypassed_approval?
     stage.deploy_requires_approval? && buddy == user
+  end
+
+  def waiting_for_buddy?
+    pending? && stage.deploy_requires_approval? && !buddy
   end
 
   def confirm_buddy!(buddy)
@@ -81,33 +85,35 @@ class Deploy < ActiveRecord::Base
     started_at || created_at
   end
 
-  def pending_non_production?
-    pending? && !stage.production?
-  end
-
   def pending_start!
-    update_attributes(updated_at: Time.now)       # hack: refresh is immediate with update
+    touch # HACK: refresh is immediate with update
     DeployService.new(user).confirm_deploy!(self)
-  end
-
-  def waiting_for_buddy?
-    pending? && stage.production?
   end
 
   def self.active
     includes(:job).where(jobs: { status: Job::ACTIVE_STATUSES })
   end
 
+  def self.active_count
+    Rails.cache.fetch('deploy_active_count', expires_in: 10.seconds) do
+      active.count
+    end
+  end
+
+  def self.pending
+    joins(:job).where(jobs: { status: 'pending' })
+  end
+
   def self.running
-    includes(:job).where(jobs: { status: 'running' })
+    joins(:job).where(jobs: { status: 'running' })
   end
 
   def self.successful
-    includes(:job).where(jobs: { status: 'succeeded' })
+    joins(:job).where(jobs: { status: 'succeeded' })
   end
 
   def self.finished_naturally
-    includes(:job).where(jobs: { status: ['succeeded', 'failed'] })
+    joins(:job).where(jobs: { status: ['succeeded', 'failed'] })
   end
 
   def self.prior_to(deploy)
@@ -115,16 +121,36 @@ class Deploy < ActiveRecord::Base
   end
 
   def self.expired
-    threshold = BuddyCheck.deploy_max_minutes_pending.minutes.ago
-    joins(:job).where(jobs: { status: 'pending'} ).where("jobs.created_at < ?", threshold)
+    threshold = BuddyCheck.time_limit.minutes.ago
+    joins(:job).where(jobs: { status: 'pending'}).where("jobs.created_at < ?", threshold)
+  end
+
+  def buddy_name
+    user.id == buddy_id ? "bypassed" : buddy.try(:name)
+  end
+
+  def buddy_email
+    user.id == buddy_id ? "bypassed" : buddy.try(:email)
   end
 
   def url
-    AppRoutes.url_helpers.project_deploy_path(project, self)
+    Rails.application.routes.url_helpers.project_deploy_url(project, self)
   end
 
-  def full_url
-    AppRoutes.url_helpers.project_deploy_url(project, self)
+  def self.csv_header
+    [
+      "Deploy Number", "Project Name", "Deploy Summary", "Deploy Commit", "Deploy Status", "Deploy Updated",
+      "Deploy Created", "Deployer Name", "Deployer Email", "Buddy Name", "Buddy Email", "Stage Name",
+      "Production Flag", "Code deployed", "Project Deleted On", "Deploy Groups"
+    ]
+  end
+
+  def csv_line
+    [
+      id, project.name, summary, commit, job.status, updated_at, start_time, user.try(:name), user.try(:email),
+      buddy_name, buddy_email, stage.name, stage.production?, !stage.no_code_deployed, project.deleted_at,
+      stage.deploy_group_names.join('|')
+    ]
   end
 
   private
@@ -147,23 +173,37 @@ class Deploy < ActiveRecord::Base
     end
   end
 
-  def validate_stage_is_deployable
+  def validate_stage_is_unlocked
     if stage.locked_for?(user) || Lock.global.exists?
       errors.add(:stage, 'is locked')
-    elsif deploy = stage.current_deploy
-      errors.add(:stage, "is being deployed by #{deploy.job.user.name} with #{deploy.short_reference}")
+    end
+  end
+
+  # commands and deploy groups can change via many different paths,
+  # so we validate once a user actually tries to execute the command
+  def validate_stage_uses_deploy_groups_properly
+    if DeployGroup.enabled? && stage.deploy_groups.none? && stage.script.include?("$DEPLOY_GROUPS")
+      errors.add(
+        :stage,
+        "contains at least one command using the $DEPLOY_GROUPS environment variable," \
+        " but there are no Deploy Groups associated with this stage."
+      )
     end
   end
 
   def deploy_buddy
-    return unless BuddyCheck.enabled? && stage.production?
+    return unless stage.deploy_requires_approval?
 
     if buddy.nil? && pending?
       "(waiting for a buddy)"
-    elsif buddy.nil? || (user.id == buddy.id)
+    elsif buddy.nil? || job.user_id == buddy_id
       "(without a buddy)"
     else
       "(with #{buddy.name})"
     end
+  end
+
+  def trim_reference
+    self.reference = reference.strip if reference.present?
   end
 end

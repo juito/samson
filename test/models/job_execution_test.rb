@@ -1,4 +1,7 @@
+# frozen_string_literal: true
 require_relative '../test_helper'
+
+SingleCov.covered! uncovered: 6
 
 describe JobExecution do
   include GitRepoTestHelper
@@ -20,9 +23,10 @@ describe JobExecution do
     create_repo_with_tags('v1')
     user.name = 'John Doe'
     user.email = 'jdoe@test.com'
-    project.repository.clone!(mirror: true)
+    project.repository.update_local_cache!
     job.deploy = deploy
     JobExecution.enabled = true
+    JobExecution.clear_registry
   end
 
   after do
@@ -83,7 +87,7 @@ describe JobExecution do
     assert job.succeeded?
     assert_equal 'mantis shrimp', last_line_of_output
     assert job.commit.present?, "Expected #{job} to record the commit"
-    assert_includes commit, job.commit
+    assert_equal commit, job.commit
     assert_includes 'annotated_tag', job.tag
   end
 
@@ -113,16 +117,30 @@ describe JobExecution do
     assert_equal 'zebra', last_line_of_output
   end
 
-  it "exports deploy information as environment variables" do
+  it "tests additional exports hook" do
     job.update(command: 'env | sort')
+
+    Samson::Hooks.callback :job_additional_vars do |_job|
+      { ADDITIONAL_EXPORT: "yes" }
+    end
+
     execute_job
     lines = job.output.split "\n"
-    lines.must_include "DEPLOY_URL=#{deploy.full_url}"
+    lines.must_include "ADDITIONAL_EXPORT=yes"
+  end
+
+  it "exports deploy information as environment variables" do
+    job.update(command: 'env | sort')
+    execute_job('master', FOO: 'bar')
+    lines = job.output.split "\n"
+    lines.must_include "DEPLOY_URL=#{deploy.url}"
     lines.must_include "DEPLOYER=jdoe@test.com"
     lines.must_include "DEPLOYER_EMAIL=jdoe@test.com"
     lines.must_include "DEPLOYER_NAME=John Doe"
-    lines.must_include "REVISION=master"
+    lines.must_include "REFERENCE=master"
+    lines.must_include "REVISION=#{job.commit}"
     lines.must_include "TAG=v1"
+    lines.must_include "FOO=bar"
   end
 
   it 'works without a deploy' do
@@ -131,14 +149,6 @@ describe JobExecution do
     execution.send(:run!)
     # if you like, pretend there's a wont_raise assertion here
     # this is to make sure we don't add a hard dependency on having a deploy
-  end
-
-  it 'exports deploy_group information if deploy groups present' do
-    job.update(command: 'env | sort')
-    execute_job
-    lines = job.output.split "\n"
-    lines.must_include "# Deploy URL: #{deploy.url}"
-    lines.must_include 'DEPLOY_GROUPS=\;\|sudo\ make-sandwich\ / pod1 pod2'
   end
 
   it 'does not export deploy_group information if no deploy groups present' do
@@ -159,7 +169,7 @@ describe JobExecution do
   end
 
   it 'removes the job from the registry' do
-    execution = JobExecution.start_job('master', job)
+    execution = JobExecution.start_job(JobExecution.new('master', job))
 
     JobExecution.find_by_id(job.id).wont_be_nil
 
@@ -174,10 +184,43 @@ describe JobExecution do
     assert_equal true, called_subscriber
   end
 
+  it 'outputs start / stop events' do
+    execution = JobExecution.new('master', job)
+    output = execution.output
+    execution.send(:run!)
+
+    assert output.include?(:started, '')
+    assert output.include?(:finished, '')
+  end
+
+  it 'calls subscribers after queued stoppage' do
+    called_subscriber = false
+
+    execution = JobExecution.new('master', job)
+    execution.on_complete { called_subscriber = true }
+    execution.stop!
+
+    assert_equal true, called_subscriber
+    assert_equal 'cancelled', job.status
+  end
+
   it 'saves job output before calling subscriber' do
     output = nil
     execute_job { output = job.output }
     assert_equal 'monkey', output.split("\n").last.strip
+  end
+
+  it 'errors if job setup fails' do
+    execute_job('nope')
+    assert_equal 'errored', job.status
+    job.output.to_s.must_include "Could not find commit for nope"
+  end
+
+  it 'errors if job commit resultion fails, but checkout works' do
+    GitRepository.any_instance.expects(:commit_from_ref).returns nil
+    execute_job('master')
+    assert_equal 'errored', job.status
+    job.output.to_s.must_include "Could not find commit for master"
   end
 
   it 'cannot setup project if project is locked' do
@@ -191,20 +234,53 @@ describe JobExecution do
     end
   end
 
+  it 'can access secrets' do
+    id = "global/#{project.permalink}/global/bar"
+    create_secret id
+    job.update(command: "echo 'secret://bar'")
+    execute_job("master")
+    assert_equal 'MY-SECRET', last_line_of_output
+  end
+
+  describe "kubernetes" do
+    before { stage.update_column :kubernetes, true }
+
+    it "does the execution with the kubernetes executor" do
+      Kubernetes::DeployExecutor.any_instance.expects(:execute!).returns true
+      execute_job("master")
+    end
+
+    it "does not clone the repo" do
+      GitRepository.any_instance.expects(:checkout_workspace).never
+      execute_job("master")
+    end
+  end
+
   describe 'when JobExecution is disabled' do
     before do
       JobExecution.enabled = false
     end
 
     it 'does not add the job to the registry' do
-      job_execution = JobExecution.start_job('master', job)
+      job_execution = JobExecution.start_job(JobExecution.new('master', job))
       job_execution.wont_be_nil
-      JobExecution.find_by_id(job.id).must_be_nil
+
+      JobExecution.find_by_id(job.id).must_equal(job_execution)
+      JobExecution.queued?(job.id).must_equal(false)
+      JobExecution.active?(job.id).must_equal(false)
     end
   end
 
   describe "#start!" do
+    def with_hidden_errors
+      Rails.application.config.consider_all_requests_local = false
+      yield
+    ensure
+      Rails.application.config.consider_all_requests_local = true
+    end
+
     let(:execution) { JobExecution.new('master', job) }
+    let(:model_file) { 'app/models/job_execution.rb' }
 
     it "runs a job" do
       execution.start!
@@ -213,12 +289,46 @@ describe JobExecution do
       job.reload.output.must_include "cat foo"
     end
 
-    it "records exceptions" do
+    it "records exceptions to output" do
+      Airbrake.expects(:notify)
       job.expects(:run!).raises("Oh boy")
       execution.start!
       execution.wait!
       execution.output.to_s.must_include "JobExecution failed: Oh boy"
-      job.reload.output.must_include "JobExecution failed: Oh boy"
+      job.reload.output.must_include "JobExecution failed: Oh boy" # shows error message
+      job.reload.output.must_include model_file # shows important backtrace
+      job.reload.output.wont_include 'test/models/job_execution_test.rb' # hides unimportant backtrace
+    end
+
+    it "does not spam airbrake on user erorrs" do
+      Airbrake.expects(:notify).never
+      job.expects(:run!).raises(Samson::Hooks::UserError, "Oh boy")
+      execution.start!
+      execution.wait!
+      execution.output.to_s.must_include "JobExecution failed: Oh boy"
+    end
+
+    it "does not show error backtraces in production to hide internals" do
+      with_hidden_errors do
+        Airbrake.expects(:notify)
+        job.expects(:run!).raises("Oh boy")
+        execution.start!
+        execution.wait!
+        execution.output.to_s.must_include "JobExecution failed: Oh boy"
+        execution.output.to_s.wont_include model_file
+      end
+    end
+
+    it "shows airbrake error location" do
+      with_hidden_errors do
+        Airbrake.expects(:notify).returns("12345")
+        Airbrake.expects(:configuration).returns(stub(user_information: 'href="http://foo.com/{{error_id}}"'))
+        job.expects(:run!).raises("Oh boy")
+        execution.start!
+        execution.wait!
+        execution.output.to_s.must_include "JobExecution failed: Oh boy"
+        execution.output.to_s.must_include "http://foo.com/12345"
+      end
     end
   end
 
@@ -233,19 +343,21 @@ describe JobExecution do
 
     it "stops the execution with kill if job has already been interrupted" do
       begin
-        old, JobExecution.stop_timeout = JobExecution.stop_timeout, 1
+        old = JobExecution.stop_timeout
+        JobExecution.stop_timeout = 0
         execution.start!
         TerminalExecutor.any_instance.expects(:stop!).with('INT')
         TerminalExecutor.any_instance.expects(:stop!).with('KILL')
         execution.stop!
+        job.reload.status.must_equal 'cancelled'
       ensure
         JobExecution.stop_timeout = old
       end
     end
   end
 
-  def execute_job(branch = 'master')
-    execution = JobExecution.new(branch, job)
+  def execute_job(branch = 'master', **options)
+    execution = JobExecution.new(branch, job, options)
     execution.on_complete { yield } if block_given?
     execution.send(:run!)
   end

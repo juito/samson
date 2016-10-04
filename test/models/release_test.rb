@@ -1,4 +1,7 @@
+# frozen_string_literal: true
 require_relative '../test_helper'
+
+SingleCov.covered! uncovered: 4
 
 describe Release do
   describe "create" do
@@ -16,6 +19,23 @@ describe Release do
       release.update_column(:number, 41)
       release = project.releases.create!(commit: "foo", author: author)
       assert_equal 42, release.number
+    end
+
+    it 'uses the specified release number' do
+      release = project.releases.create!(author: author, commit: "bar", number: 1234)
+      assert_equal 1234, release.number
+    end
+
+    it 'uses the default release number if build number is nil' do
+      project.releases.destroy_all
+      release = project.releases.create!(author: author, commit: "bar", number: nil)
+      assert_equal 1, release.number
+    end
+
+    it 'uses the build number if build number is not given' do
+      project.releases.destroy_all
+      release = project.releases.create!(author: author, commit: "bar")
+      assert_equal 1, release.number
     end
   end
 
@@ -65,7 +85,7 @@ describe Release do
       create_deploy!(reference: "v666", status: "succeeded")
       author.destroy!
       release.reload
-      assert_equal NullUser.new.name, release.author.name
+      assert_equal NullUser.new(0).name, release.author.name
     end
 
     def create_deploy!(options)

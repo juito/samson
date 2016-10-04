@@ -1,4 +1,7 @@
+# frozen_string_literal: true
 require_relative '../test_helper'
+
+SingleCov.covered!
 
 describe DeployMailer do
   let(:stage) { stages(:test_staging) }

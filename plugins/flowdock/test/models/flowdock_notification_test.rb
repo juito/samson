@@ -1,4 +1,7 @@
+# frozen_string_literal: true
 require_relative '../test_helper'
+
+SingleCov.covered! uncovered: 7
 
 describe FlowdockNotification do
   let(:deploy) { deploys(:succeeded_test) }
@@ -37,5 +40,12 @@ describe FlowdockNotification do
     end
 
     content.must_equal "bar"
+  end
+
+  describe "#default_buddy_request_message" do
+    it "renders" do
+      message = notification.default_buddy_request_message
+      message.must_include ":pray: @team Super Admin is requesting approval to deploy Project **staging** to production"
+    end
   end
 end

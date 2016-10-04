@@ -1,11 +1,18 @@
+# frozen_string_literal: true
 module CurrentUser
   extend ActiveSupport::Concern
 
   included do
-    helper_method :logged_in?
     helper_method :current_user
-    prepend_before_action :login_users
+    around_action :login_user
+
+    # we record with reliable reset
+    skip_before_action :set_paper_trail_enabled_for_controller
+    skip_before_action :set_paper_trail_whodunnit
+    skip_before_action :set_paper_trail_controller_info
   end
+
+  private
 
   def current_user
     @current_user ||= warden.user
@@ -20,15 +27,37 @@ module CurrentUser
     warden.logout
   end
 
-  def logged_in?
-    !!current_user
-  end
-
-  def login_users
-    warden.authenticate!
+  def login_user
+    warden.authenticate || unauthorized!
+    PaperTrail.with_whodunnit(current_user.id) { yield }
   end
 
   def warden
     request.env['warden']
+  end
+
+  def unauthorized!
+    Rails.logger.warn('Halted as unauthorized! threw :warden')
+    throw(:warden) # Warden::Manager middleware catches this and calls UnauthorizedController
+  end
+
+  def authorize_super_admin!
+    unauthorized! unless current_user.super_admin?
+  end
+
+  def authorize_admin!
+    unauthorized! unless current_user.admin?
+  end
+
+  def authorize_project_admin!
+    unauthorized! unless current_user.admin_for?(current_project)
+  end
+
+  def authorize_deployer!
+    unauthorized! unless current_user.deployer?
+  end
+
+  def authorize_project_deployer!
+    unauthorized! unless current_user.deployer_for?(current_project)
   end
 end

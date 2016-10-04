@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 class UnauthorizedController < ActionController::Metal
   include ActionController::UrlFor
   include ActionController::Redirecting
@@ -19,8 +20,8 @@ class UnauthorizedController < ActionController::Metal
   def respond
     respond_to do |format|
       format.html do
-        flash[:error] = "You are not authorized to view this page."
-        redirect_back_or(root_path)
+        flash[:authorization_error] = "You are not authorized to view this page."
+        redirect_back_or(login_path)
       end
 
       format.json do
@@ -32,8 +33,6 @@ class UnauthorizedController < ActionController::Metal
   private
 
   def redirect_back_or(path)
-    redirect_to :back
-  rescue ActionController::RedirectBackError
-    redirect_to path
+    redirect_back fallback_location: path
   end
 end

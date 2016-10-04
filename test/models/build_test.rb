@@ -1,10 +1,15 @@
+# frozen_string_literal: true
 require_relative '../test_helper'
+
+SingleCov.covered!
 
 describe Build do
   include GitRepoTestHelper
 
   let(:project) { Project.new(id: 99999, name: 'test_project', repository_url: repo_temp_dir) }
-  let(:sha_digest) { 'cbbf2f9a99b47fc460d422812b6a5adff7dfee951d8fa2e4a98caa0382cfbdbf' }
+  let(:example_sha) { 'cbbf2f9a99b47fc460d422812b6a5adff7dfee951d8fa2e4a98caa0382cfbdbf' }
+  let(:repo_digest) { "my-registry.zende.sk/some_project@sha256:#{example_sha}" }
+  let(:build) { builds(:staging) }
 
   def valid_build(attributes = {})
     Build.new(attributes.reverse_merge(project: project, git_ref: 'master'))
@@ -25,7 +30,7 @@ describe Build do
       FileUtils.rm_rf(cached_repo_dir)
     end
 
-    it 'should validate git sha' do
+    it 'validates git sha' do
       Dir.chdir(repo_temp_dir) do
         assert_valid(valid_build(git_ref: nil, git_sha: current_commit))
         refute_valid(valid_build(git_ref: nil, git_sha: '0123456789012345678901234567890123456789'))
@@ -34,13 +39,14 @@ describe Build do
       end
     end
 
-    it 'should validate container sha' do
-      assert_valid(valid_build(docker_image_id: sha_digest))
+    it 'validates image id' do
+      assert_valid(valid_build(docker_image_id: example_sha))
+      assert_valid(valid_build(docker_image_id: "sha256:#{example_sha}"))
       refute_valid(valid_build(docker_image_id: 'This is a string of 64 characters...............................'))
       refute_valid(valid_build(docker_image_id: 'abc'))
     end
 
-    it 'should validate git_ref' do
+    it 'validates git_ref' do
       assert_valid(valid_build(git_ref: 'master'))
       assert_valid(valid_build(git_ref: git_tag))
       refute_valid(Build.new(project: project))
@@ -49,27 +55,28 @@ describe Build do
       end
       refute_valid(valid_build(git_ref: 'some_tag_i_made_up'))
     end
+
+    it 'validates docker digest' do
+      assert_valid(valid_build(docker_repo_digest: repo_digest))
+      assert_valid(valid_build(docker_repo_digest: "my-registry.zende.sk/samson/another_project@sha256:#{example_sha}"))
+      refute_valid(valid_build(docker_repo_digest: example_sha))
+      refute_valid(valid_build(docker_repo_digest: 'some random string'))
+    end
   end
 
-  describe 'successful?' do
-    let(:build) { builds(:staging) }
+  describe 'create' do
+    let(:project) { projects(:test) }
 
-    it 'returns true when all successful' do
-      build.statuses.create!(source: 'Jenkins', status: BuildStatus::SUCCESSFUL)
-      build.statuses.create!(source: 'Travis',  status: BuildStatus::SUCCESSFUL)
-      assert build.successful?
+    before do
+      create_repo_without_tags
+      project.repository_url = repo_temp_dir
     end
 
-    it 'returns false when there is a failure' do
-      build.statuses.create!(source: 'Jenkins', status: BuildStatus::SUCCESSFUL)
-      build.statuses.create!(source: 'Travis',  status: BuildStatus::FAILED)
-      refute build.successful?
-    end
-
-    it 'returns false when there is a pending status' do
-      build.statuses.create!(source: 'Jenkins', status: BuildStatus::SUCCESSFUL)
-      build.statuses.create!(source: 'Travis',  status: BuildStatus::PENDING)
-      refute build.successful?
+    it 'increments the build number' do
+      biggest_build_num = project.builds.maximum(:number) || 0
+      build = project.builds.create!(git_ref: 'master')
+      assert_valid(build)
+      assert_equal(biggest_build_num + 1, build.number)
     end
   end
 
@@ -87,6 +94,52 @@ describe Build do
       build.docker_image = mock_docker_image
       assert_equal(docker_image_id, build.docker_image_id)
       assert_equal(mock_docker_image, build.docker_image)
+    end
+  end
+
+  describe "#url" do
+    it "builds a url" do
+      build = builds(:staging)
+      build.url.must_equal "http://www.test-url.com/projects/foo/builds/#{build.id}"
+    end
+  end
+
+  describe "#nice_name" do
+    it "builds a nice name" do
+      build.nice_name.must_equal "Build #{build.id}"
+    end
+
+    it "uses the label when avialable" do
+      build.label = 'foo'
+      build.nice_name.must_equal "Build foo"
+    end
+  end
+
+  describe "#commit_url" do
+    it "builds a path when the url is unknown" do
+      build.commit_url.must_equal "/tree/da39a3ee5e6b4b0d3255bfef95601890afd80709"
+    end
+
+    it "builds a full url when host is known" do
+      build.project.repository_url = 'git@github.com:foo/bar.git'
+      build.commit_url.must_equal "https://github.com/foo/bar/tree/da39a3ee5e6b4b0d3255bfef95601890afd80709"
+    end
+  end
+
+  describe "#docker_status" do
+    it "is the build status" do
+      build.docker_build_job = Job.new(status: 'foo')
+      build.docker_status.must_equal "foo"
+    end
+
+    it "is not built when there is no build" do
+      build.docker_status.must_equal "not built"
+    end
+  end
+
+  describe "#create_docker_job" do
+    it "creates a job" do
+      build.create_docker_job.class.must_equal Job
     end
   end
 end

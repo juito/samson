@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 Samson::Application.configure do
   # Settings specified here will take precedence over those in config/application.rb.
 
@@ -15,11 +16,17 @@ Samson::Application.configure do
 
   # Don't care if the mailer can't send.
   config.action_mailer.raise_delivery_errors = false
+  config.action_mailer.perform_caching = false
 
-  self.default_url_options.merge!( port: config.samson.uri.port )
+  default_url_options[:port] = config.samson.uri.port
 
-  # Print deprecation notices to the Rails logger.
-  config.active_support.deprecation = :log
+  config.active_support.deprecation = -> (message, _backtrace) do
+    if message.include?("#original_exception is deprecated")
+      # ignored until https://github.com/charliesome/better_errors/issues/333
+    else
+      raise message
+    end
+  end
 
   # Raise an error on page load if there are pending migrations
   config.active_record.migration_error = :page_load
@@ -29,14 +36,12 @@ Samson::Application.configure do
   # number of complex assets.
   config.assets.debug = false
 
-  # Lograge
-  # For testing purposes, you need to have something like this in your asl.conf (Mac OS X):
-  # ? [= Sender samson] file /Users/myuser/Code/samson/log/samson.log mode=0644
-  # require 'syslog/logger'
-  # config.logger = Syslog::Logger.new('samson')
-
-  # config.lograge.enabled = true
-  # config.lograge.formatter = Lograge::Formatters::Logstash.new
+  # Suppress logger output for asset requests.
+  config.assets.quiet = true
 
   BetterErrors::Middleware.allow_ip! ENV['TRUSTED_IP'] if ENV['TRUSTED_IP']
+
+  # Use an evented file watcher to asynchronously detect changes in source code,
+  # routes, locales, etc. This feature depends on the listen gem.
+  # config.file_watcher = ActiveSupport::EventedFileUpdateChecker
 end

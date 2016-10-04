@@ -13,11 +13,11 @@
       </thead>
 
       <tbody>
-        <% @environments.each do |env| %>
+        <% environments.each do |env| %>
           <tr>
             <td><%= env.id%></td>
             <td><%= env.name%></td>
-            <td><%= env.is_production ? 'Yes' : 'No' %></td>
+            <td><%= env.production ? 'Yes' : 'No' %></td>
             <td>
               <%= link_to "Edit", edit_admin_environment_path(env) %>
               |

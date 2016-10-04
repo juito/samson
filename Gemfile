@@ -1,51 +1,80 @@
+# frozen_string_literal: true
 source 'https://rubygems.org'
 
-gem 'bundler', '>= 1.8.4'
+ruby File.read('.ruby-version').strip
 
-gem 'rails', '~> 4.2.0'
+# gems that have rails engines are are always needed
+group :preload do
+  gem 'rails', '5.0.0.1'
+  gem 'dotenv'
+  gem 'sse-rails-engine'
+
+  # AR extensions
+  gem 'goldiloader'
+  gem 'kaminari', '~> 0.17.0'
+  gem 'active_model_serializers'
+  gem 'paper_trail'
+  gem 'soft_deletion'
+  gem 'doorkeeper'
+
+  # Logging
+  gem 'lograge'
+  gem 'logstash-event'
+end
+
+gem 'bundler'
+gem 'dogstatsd-ruby'
 gem 'puma'
-gem 'dotenv-rails', '~> 0.9'
+gem 'attr_encrypted'
+gem 'sawyer'
+gem 'dalli'
+gem 'omniauth'
+gem 'omniauth-oauth2'
+gem 'omniauth-github'
+gem 'omniauth-google-oauth2'
+gem 'omniauth-ldap'
+gem 'omniauth-gitlab', '~> 1.0.0'
+gem 'octokit'
+gem 'faraday'
+gem 'faraday-http-cache'
+gem 'warden'
+gem 'active_hash'
+gem 'ansible'
+gem 'github-markdown'
+gem 'coderay'
+gem 'net-http-persistent'
+gem 'concurrent-ruby'
+gem 'vault'
+gem 'docker-api', '>= 1.32'
+gem 'warden-doorkeeper'
+gem 'kubeclient', '~> 1.2.0'
 
-gem 'dogstatsd-ruby', '~> 1.4.0', require: 'statsd'
-gem 'goldiloader'
+# treat included plugins like gems
+Dir[File.join(Bundler.root, 'plugins/*/')].each { |f| gemspec path: f }
+
+gem 'sucker_punch', '~> 2.0'
 
 group :mysql2 do
-  gem 'mysql2', '~> 0.3'
+  gem 'mysql2'
 end
 
 group :postgres do
-  gem 'pg', '~> 0.13'
+  gem 'pg'
 end
 
 group :sqlite do
   gem "sqlite3"
 end
 
-gem 'kaminari'
-gem 'soft_deletion', '~> 0.4'
-gem 'dalli', '~> 2.7.0'
-gem 'active_model_serializers', '~> 0.8.0'
-
-gem 'sawyer', '~> 0.5'
-gem 'sse-rails-engine'
-
-# Logging
-gem 'lograge'
-gem 'logstash-event'
-
-# Docker
-gem 'docker-api'
-
 group :production, :staging do
-  gem 'rails_12factor'
-  gem 'airbrake', '~> 4.1.0'
-  gem 'newrelic_rpm', '>= 3.7.1'
+  gem 'airbrake', '~> 4.3.6' # different configuration format on 5.x
+  gem 'newrelic_rpm'
 end
 
 group :assets do
   gem 'ngannotate-rails'
-  gem 'sass-rails', '~> 5.0'
-  gem 'uglifier', '>= 1.3.0'
+  gem 'sass-rails'
+  gem 'uglifier'
   gem 'angular-rails-templates'
   gem 'bootstrap-sass'
 
@@ -53,6 +82,9 @@ group :assets do
     gem 'rails-assets-angular'
     gem 'rails-assets-angular-mocks'
     gem 'rails-assets-angular-scenario'
+    gem 'rails-assets-angular-ui-bootstrap-bower'
+    gem 'rails-assets-spin'
+    gem 'rails-assets-angular-spinner'
     gem 'rails-assets-bootstrap-select'
     gem 'rails-assets-font-awesome'
     gem 'rails-assets-jquery'
@@ -62,46 +94,44 @@ group :assets do
     gem 'rails-assets-rickshaw'
     gem 'rails-assets-typeahead.js'
     gem 'rails-assets-underscore'
-    gem 'rails-assets-vis'
+    gem 'rails-assets-vis', '~> 4.10.0'
     gem 'rails-assets-x-editable'
+    gem 'rails-assets-message-center'
+    gem 'rails-assets-angular-ui-router'
+    gem 'rails-assets-angular-truncate-2'
+    gem 'rails-assets-jstimezonedetect'
+    gem 'rails-assets-jquery-cookie'
+    gem 'rails-assets-datatables.net'
+    gem 'rails-assets-datatables.net-bs'
+    gem 'rails-assets-datatables.net-fixedcolumns'
+    gem 'rails-assets-datatables.net-fixedcolumns-bs'
   end
 end
 
-group :no_preload do
-  gem 'omniauth', '~> 1.1'
-  gem 'omniauth-oauth2', '~> 1.1'
-  gem 'omniauth-github', '= 1.1.1'
-  gem 'omniauth-google-oauth2', '~> 0.2.4'
-  gem 'octokit', '~> 3.0'
-  gem 'faraday-http-cache', '~> 0.4'
-  gem 'warden', '~> 1.2'
-  gem 'active_hash', '~> 1.0'
-  gem 'ansible'
-  gem 'github-markdown', '~> 0.6.3'
-  gem 'newrelic_api'
-  gem 'activeresource'
-  gem 'coderay', '~> 1.1.0'
-  gem 'dogapi', '~> 1.9'
-  gem 'net-http-persistent'
-  Dir["plugins/*/"].each { |f| gemspec path: f, require: false } # treat included plugins like gems
-end
-
 group :development, :staging do
-  gem "binding_of_caller"
+  gem 'binding_of_caller'
   gem 'better_errors'
   gem 'rack-mini-profiler'
 end
 
 group :development, :test do
-  gem 'byebug', require: false
+  gem 'byebug'
+  gem 'bootscale'
+  gem 'pry-rails'
+  gem 'pry'
+  gem 'awesome_print'
+  gem 'brakeman'
+  gem 'rubocop'
 end
 
 group :test do
-  gem 'minitest-rails'
+  gem 'minitest-rails', '3.0.0'
+  gem 'rails-controller-testing'
   gem 'maxitest'
-  gem 'mocha', require: false
-  gem 'webmock', require: false
-  gem 'simplecov', require: false
+  gem 'mocha'
+  gem 'webmock'
+  gem 'single_cov'
+  gem 'simplecov'
   gem 'query_diet'
-  gem 'codeclimate-test-reporter', require: false
+  gem 'codeclimate-test-reporter'
 end

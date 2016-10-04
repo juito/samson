@@ -1,4 +1,7 @@
+# frozen_string_literal: true
 require_relative '../test_helper'
+
+SingleCov.covered! uncovered: 3
 
 describe EventStreamer do
   class FakeStream
@@ -36,7 +39,7 @@ describe EventStreamer do
   let(:stream) { FakeStream.new }
   let(:streamer) { EventStreamer.new(stream) }
 
-  after { extra_threads.each(&:kill) } # heartbeat never finishes
+  after { kill_extra_threads } # heartbeat never finishes
 
   it "writes each message in the output into the stream" do
     streamer.start(output)
@@ -61,10 +64,5 @@ describe EventStreamer do
   it "closes the stream when there is no more output" do
     streamer.start(output)
     assert stream.closed?
-  end
-
-  it "writes a finished event" do
-    streamer.start(output)
-    stream.lines.must_include "event: finished\ndata: \n\n"
   end
 end

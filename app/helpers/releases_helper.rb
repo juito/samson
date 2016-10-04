@@ -1,13 +1,15 @@
+# frozen_string_literal: true
 module ReleasesHelper
   def release_label(project, release)
     path = [project, release]
-    classes = %w(release-label label)
+    classes = %w[release-label label]
 
-    if release.changeset.hotfix?
-      classes << "label-warning"
-    else
-      classes << "label-success"
-    end
+    classes <<
+      if release.changeset.hotfix?
+        "label-warning"
+      else
+        "label-success"
+      end
 
     content = link_to(release.version, path, class: classes.join(" "))
 
@@ -22,7 +24,7 @@ module ReleasesHelper
   def link_to_deploy_stage(stage, release)
     deploy_params = { reference: release.version }
 
-    if stage.confirm_before_deploying?
+    if stage.confirm?
       link_to stage.name, new_project_stage_deploy_path(@project, stage, deploy_params)
     else
       link_to stage.name, project_stage_deploys_path(@project, stage, deploy: deploy_params), method: :post

@@ -1,12 +1,16 @@
+# frozen_string_literal: true
 class ProjectsController < ApplicationController
+  include CurrentProject
   include StagePermittedParams
 
-  before_action :authorize_admin!, except: [:show, :index, :deploy_group_versions]
-  before_action :redirect_viewers!, only: [:show]
-  before_action :project, only: [:show, :edit, :update, :deploy_group_versions]
-  before_action :get_environments, only: [:new, :create]
+  skip_before_action :require_project, only: [:index, :new, :create]
+
+  before_action :authorize_admin!, only: [:new, :create, :destroy]
+  before_action :authorize_project_admin!, except: [:show, :index, :deploy_group_versions]
 
   helper_method :project
+
+  alias_method :project, :current_project
 
   def index
     respond_to do |format|
@@ -23,8 +27,7 @@ class ProjectsController < ApplicationController
   def new
     @project = Project.new
     @project.current_user = current_user
-    stage = @project.stages.build(name: "Production")
-    stage.new_relic_applications.build
+    @project.stages.build(name: "Production")
   end
 
   def create
@@ -32,19 +35,21 @@ class ProjectsController < ApplicationController
     @project.current_user = current_user
 
     if @project.save
-      if ENV['PROJECT_CREATED_NOTIFY_ADDRESS']
-        ProjectMailer.created_email(@current_user,@project).deliver_later
+      if Rails.application.config.samson.project_created_email
+        ProjectMailer.created_email(@current_user, @project).deliver_later
       end
       redirect_to @project
       Rails.logger.info("#{@current_user.name_and_email} created a new project #{@project.to_param}")
     else
-      flash[:error] = @project.errors.full_messages
       render :new
     end
   end
 
   def show
-    @stages = project.stages
+    respond_to do |format|
+      format.html { @stages = project.stages }
+      format.json { render json: project.to_json(except: [:token, :deleted_at]) }
+    end
   end
 
   def edit
@@ -54,16 +59,8 @@ class ProjectsController < ApplicationController
     if project.update_attributes(project_params)
       redirect_to project
     else
-      flash[:error] = project.errors.full_messages
       render :edit
     end
-  end
-
-  def destroy
-    project.soft_delete!
-
-    flash[:notice] = "Project removed."
-    redirect_to admin_projects_path
   end
 
   def deploy_group_versions
@@ -85,33 +82,23 @@ class ProjectsController < ApplicationController
         :owner,
         :permalink,
         :release_branch,
-        :deploy_with_docker,
-        stages_attributes: stage_permitted_params
+        :docker_release_branch,
+        :include_new_deploy_groups,
+        { stages_attributes: stage_permitted_params }
       ] + Samson::Hooks.fire(:project_permitted_params)
     )
   end
 
-  def project
-    @project ||= Project.find_by_param!(params[:id]).tap do |project|
-      project.current_user = current_user
-    end
-  end
-
-  def redirect_viewers!
-    unless current_user.is_deployer?
-      redirect_to project_deploys_path(project)
-    end
-  end
-
   def projects_for_user
-    if current_user.starred_projects.any?
-      current_user.starred_projects
+    if ids = current_user.starred_project_ids.presence
+      Project.where(id: ids)
     else
       Project
     end
   end
 
-  def get_environments
-    @environments = Environment.all
+  # Overriding require_project from CurrentProject
+  def require_project
+    @project = (Project.find_by_param!(params[:id]) if params[:id])
   end
 end

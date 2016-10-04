@@ -1,11 +1,14 @@
+# frozen_string_literal: true
 require_relative '../test_helper'
+
+SingleCov.covered!
 
 describe Webhook do
   let(:webhook_attributes) { { branch: 'master', stage_id: 1, project_id: 1, source: 'any_ci'} }
 
   describe '#create' do
     it 'creates the webhook' do
-      assert_difference  'Webhook.count', +1 do
+      assert_difference 'Webhook.count', +1 do
         Webhook.create!(webhook_attributes)
       end
     end
@@ -21,11 +24,11 @@ describe Webhook do
     it 'recreates a webhook after soft_delete' do
       webhook = Webhook.create!(webhook_attributes)
 
-      assert_difference  'Webhook.count', -1 do
+      assert_difference 'Webhook.count', -1 do
         webhook.soft_delete!
       end
 
-      assert_difference  'Webhook.count', +1 do
+      assert_difference 'Webhook.count', +1 do
         Webhook.create!(webhook_attributes)
       end
     end
@@ -37,7 +40,7 @@ describe Webhook do
     before { webhook }
 
     it 'deletes the webhook' do
-      assert_difference  'Webhook.count', -1 do
+      assert_difference 'Webhook.count', -1 do
         webhook.soft_delete!
       end
     end
@@ -51,12 +54,12 @@ describe Webhook do
     # We have validation to stop us from having multiple of the same webhook active.
     # lets ensure that same validation doesn't stop us from having multiple of the same webhook soft-deleted.
     it 'can soft delete duplicate webhooks' do
-      assert_difference  'Webhook.count', -1 do
+      assert_difference 'Webhook.count', -1 do
         webhook.soft_delete!
       end
 
       webhook2 = Webhook.create!(webhook_attributes)
-      assert_difference  'Webhook.count', -1 do
+      assert_difference 'Webhook.count', -1 do
         webhook2.soft_delete!
       end
     end
@@ -72,6 +75,19 @@ describe Webhook do
     it 'filters correctly' do
       assert_equal Webhook.for_source('ci', 'travis').pluck(:source), ['any_ci', 'travis', 'any']
       assert_equal Webhook.for_source('code', 'github').pluck(:source), ['any_code', 'github', 'any']
+    end
+  end
+
+  describe '.for_branch' do
+    before do
+      ['', 'master', 'feature/branch'].each_with_index do |branch, index|
+        Webhook.create(branch: branch, stage_id: index, project_id: 1, source: 'any_code')
+      end
+    end
+
+    it 'filters correctly' do
+      assert_equal Webhook.for_branch('feature/branch').pluck(:branch), ['', 'feature/branch']
+      assert_equal Webhook.for_branch('master').pluck(:branch), ['', 'master']
     end
   end
 end

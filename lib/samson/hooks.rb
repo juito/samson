@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 module Samson
   module Hooks
     class UserError < StandardError
@@ -5,8 +6,16 @@ module Samson
 
     VIEW_HOOKS = [
       :stage_form,
+      :stage_show,
       :project_form,
+      :build_new,
+      :deploy_group_show,
+      :deploy_group_form,
+      :deploy_group_table_header,
+      :deploy_group_table_cell,
       :deploys_header,
+      :deploy_tab_nav,
+      :deploy_tab_body,
       :deploy_view,
       :deploy_form, # for external plugin, so they can add extra form fields
       :admin_menu,
@@ -18,17 +27,26 @@ module Samson
       :stage_permitted_params,
       :deploy_permitted_params, # for external plugin
       :project_permitted_params,
+      :deploy_group_permitted_params,
+      :build_params,
       :before_deploy,
       :after_deploy_setup,
       :after_deploy,
+      :before_docker_build,
       :after_docker_build,
+      :after_job_execution,
+      :job_additional_vars,
+      :edit_deploy_group,
+      :buildkite_release_params,
+      :release_deploy_conditions,
+      :deploy_group_env
     ].freeze
 
-    INTERNAL_HOOKS = [ :class_defined ]
+    INTERNAL_HOOKS = [:class_defined].freeze
 
     KNOWN = VIEW_HOOKS + EVENT_HOOKS + INTERNAL_HOOKS
 
-    @@hooks = {}
+    @hooks = {}
 
     class Plugin
       attr_reader :name, :folder
@@ -39,14 +57,14 @@ module Samson
       end
 
       def active?
-        Rails.env.test? || ENV["PLUGINS"] == "all" || ENV["PLUGINS"].to_s.split(',').map(&:strip).include?(@name)
+        Hooks.active_plugin?(@name)
       end
 
       def load
         lib = "#{@folder}/lib"
         $LOAD_PATH << lib
         require @path
-        engine.config.autoload_paths << lib
+        engine.config.eager_load_paths << lib
       end
 
       def add_migrations
@@ -61,7 +79,7 @@ module Samson
       end
 
       def add_assets_to_precompile
-        engine.config.assets.precompile += %W(#{name}/application.css #{name}/application.js)
+        engine.config.assets.precompile += %W[#{name}/application.css #{name}/application.js]
       end
 
       def engine
@@ -93,6 +111,16 @@ module Samson
         end
       end
 
+      def active_plugin?(plugin_name)
+        if Rails.env.test?
+          true
+        elsif @all_plugins_enabled
+          !@disabled_plugins.include?(plugin_name)
+        else
+          @enabled_plugins.include?(plugin_name)
+        end
+      end
+
       # configure
       def callback(name, &block)
         hooks(name) << block
@@ -116,7 +144,9 @@ module Samson
 
       # use
       def fire(name, *args)
-        hooks(name).map { |hook| hook.call(*args) }
+        NewRelic::Agent::MethodTracerHelpers.trace_execution_scoped("Custom/Hooks/#{name}") do
+          hooks(name).map { |hook| hook.call(*args) }
+        end
       end
 
       def render_views(name, view, *args)
@@ -130,6 +160,7 @@ module Samson
       end
 
       def plugin_setup
+        parse_env_var
         Samson::Hooks.plugins.
           each(&:load).
           each(&:add_migrations).
@@ -137,22 +168,31 @@ module Samson
           each(&:add_decorators)
       end
 
-      def plugin_test_setup
+      def symlink_plugin_fixtures
         fixture_path = ActiveSupport::TestCase.fixture_path
         plugins.each do |plugin|
-          fixtures = Dir.glob(File.join(plugin.folder, 'test', 'fixtures', '*.yml'))
+          fixtures = Dir.glob(File.join(plugin.folder, 'test', 'fixtures', '*'))
           fixtures.each do |fixture|
-            yml_filename = fixture[/\w+\.yml\z/]
-            new_path = File.join(fixture_path, yml_filename)
-            File.symlink(fixture, new_path)
-            Minitest.after_run { File.delete(new_path) }
+            next if !fixture.end_with?(".yml") && fixture.include?(".")
+            new_path = File.join(fixture_path, File.basename(fixture))
+            File.symlink(fixture, new_path) unless File.exist?(new_path)
+
+            # rails test does not trigger after_run and rake does not work with at_exit
+            # https://github.com/rails/rails/pull/26515
+            callback = -> { File.delete(new_path) if File.symlink?(new_path) }
+            if Minitest.respond_to?(:run_with_rails_extension) && Minitest.run_with_rails_extension
+              at_exit(&callback)
+            else
+              Minitest.after_run(&callback)
+            end
           end
         end
       end
 
       def render_javascripts(view)
         Samson::Hooks.plugins.each do |plugin|
-          next unless File.exists?(plugin.engine.config.root.join("app/assets/javascripts/#{plugin.name}/application.js"))
+          js = plugin.engine.config.root.join("app/assets/javascripts/#{plugin.name}/application.js")
+          next unless File.exist?(js)
           view.concat(view.javascript_include_tag("#{plugin.name}/application.js"))
         end
         nil
@@ -160,17 +200,42 @@ module Samson
 
       def render_stylesheets(view)
         Samson::Hooks.plugins.each do |plugin|
-          next unless File.exists?(plugin.engine.config.root.join("app/assets/stylesheets/#{plugin.name}/application.css"))
+          css = plugin.engine.config.root.join("app/assets/stylesheets/#{plugin.name}/application.css")
+          next unless File.exist?(css)
           view.concat(view.stylesheet_link_tag("#{plugin.name}/application.css"))
         end
         nil
+      end
+
+      def reset_plugins!
+        @plugins = nil
+        parse_env_var
       end
 
       private
 
       def hooks(*args)
         raise "Using unsupported hook #{args.inspect}" unless KNOWN.include?(args.first)
-        (@@hooks[args] ||= [])
+        (@hooks[args] ||= [])
+      end
+
+      # Loads the PLUGINS environment variable. See docs/plugins.md for more info.
+      def parse_env_var
+        @enabled_plugins = []
+        @disabled_plugins = []
+        @all_plugins_enabled = false
+
+        values = (ENV['PLUGINS'] || '').split(',').map(&:strip)
+
+        @all_plugins_enabled = true if values.delete('all')
+
+        values.each do |v|
+          if v.starts_with?('-')
+            @disabled_plugins << v[1..-1]
+          else
+            @enabled_plugins << v
+          end
+        end
       end
     end
   end
@@ -178,11 +243,19 @@ end
 
 module Samson::LoadDecorators
   def inherited(subclass)
-    Samson::Hooks.load_decorators(subclass.name)
     super
+    Samson::Hooks.load_decorators(subclass.name)
   end
 end
 
 Samson::Hooks.plugin_setup
-ActiveRecord::Base.extend Samson::LoadDecorators
-ActionController::Base.extend Samson::LoadDecorators
+
+class << ActiveRecord::Base
+  prepend Samson::LoadDecorators
+end
+class << ActionController::Base
+  prepend Samson::LoadDecorators
+end
+class << ActiveModel::Serializer
+  prepend Samson::LoadDecorators
+end

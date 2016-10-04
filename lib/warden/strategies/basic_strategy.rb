@@ -1,4 +1,9 @@
+# frozen_string_literal: true
+require "warden/action_dispatch_patch"
+
 class Warden::Strategies::BasicStrategy < Warden::Strategies::Base
+  include ActionDispatchPatch
+
   def valid?
     authorization.present? &&
       authorization =~ /^Basic/i
@@ -15,19 +20,17 @@ class Warden::Strategies::BasicStrategy < Warden::Strategies::Base
     # This + store? change stops the Set-Cookie header from being sent
     request.session_options[:skip] = true
 
-    if (user = User.where(email: email).where(token: token).includes(:starred_projects).first)
+    if (user = User.where(email: email).where(token: token).first)
       success!(user)
     else
+      Rails.logger.error("Auth Error for #{email}")
       halt!
     end
   end
 
   # ActionDispatch's
   def authorization
-    @authorization ||= request.env['HTTP_AUTHORIZATION'] ||
-      request.env['X-HTTP_AUTHORIZATION'] ||
-      request.env['X_HTTP_AUTHORIZATION'] ||
-      request.env['REDIRECT_X_HTTP_AUTHORIZATION']
+    RequestObject.new(request).authorization.to_s.dup
   end
 end
 

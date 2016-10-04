@@ -1,20 +1,18 @@
 samson.factory('SseFactory', function() {
   'use strict';
 
-  var sse = {
-    connection: null,
+  function connect() {
+    var origin = $('meta[name=stream-origin]').first().attr('content');
+    return new EventSource(origin + '/streaming');
+  }
 
-    init: function() {
-      this.connection = new EventSource(window.location.origin + '/streaming');
-    },
-
+  return {
+    connection: null, // needed for tests
     on: function(event, callback) {
+      this.connection = this.connection || connect();
       this.connection.addEventListener(event, function(e) {
         callback(JSON.parse(e.data));
       });
     }
   };
-
-  sse.init();
-  return sse;
 });

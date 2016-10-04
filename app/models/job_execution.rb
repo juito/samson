@@ -1,7 +1,9 @@
-require 'thread_safe'
+# frozen_string_literal: true
 require 'shellwords'
 
 class JobExecution
+  include ::NewRelic::Agent::Instrumentation::ControllerInstrumentation
+
   # Whether or not execution is enabled. This allows completely disabling job
   # execution for testing purposes.
   cattr_accessor(:enabled, instance_writer: false) do
@@ -9,72 +11,98 @@ class JobExecution
   end
 
   cattr_accessor(:lock_timeout, instance_writer: false) { 10.minutes }
-  cattr_accessor(:stop_timeout, instance_accessor: false) { 15.seconds }
+  cattr_accessor(:stop_timeout, instance_writer: false) { 15.seconds }
 
-  cattr_reader(:registry, instance_accessor: false) { {} }
+  cattr_reader(:registry, instance_accessor: false) { JobQueue.new }
   private_class_method :registry
 
-  attr_reader :output, :job, :viewers, :stage, :executor
+  attr_reader :output, :reference, :job, :viewers, :executor
 
-  def initialize(reference, job)
+  delegate :id, to: :job
+
+  def initialize(reference, job, env = {}, &block)
     @output = OutputBuffer.new
-    @executor = TerminalExecutor.new(@output, verbose: true)
+    @executor = TerminalExecutor.new(@output, verbose: true, deploy: job.deploy)
     @viewers = JobViewers.new(@output)
+
     @subscribers = []
-    @job, @reference = job, reference
-    @stage = @job.deploy.try(:stage)
+    @env = env
+    @job = job
+    @reference = reference
+    @execution_block = block
+
     @repository = @job.project.repository
     @repository.executor = @executor
+
+    on_complete do
+      @output.write('', :finished)
+      @output.close
+
+      @job.update_output!(OutputAggregator.new(@output).to_s)
+    end
   end
 
-  def start!(&block)
+  def start!
     ActiveRecord::Base.clear_active_connections!
-
-    @thread = Thread.new { run!(&block) }
+    @thread = Thread.new { run! }
   end
 
   def wait!
-    @thread.try(:join)
+    @thread.join
+  end
+
+  def pid
+    @executor.pid
+  end
+
+  # Used on queued jobs when shutting down
+  # so that the stream sockets are closed
+  def close
+    @output.write('', :reloaded)
+    @output.close
   end
 
   def stop!
-    @executor.stop! 'INT'
-    self.class.stop_timeout.times do
-      return unless @thread.alive?
-      sleep 1
+    if @thread
+      @executor.stop! 'INT'
+      return if @thread.join(stop_timeout)
+
+      @executor.stop! 'KILL'
+      @thread.join(stop_timeout) ||
+        (Rails.env.test? ? @thread.join : @thread.kill) # miniest runs before blocks twice when killing thread here
     end
-    @executor.stop! 'KILL'
-    wait!
+
+    @job.cancelled!
+    finish
   end
 
   def on_complete(&block)
-    @subscribers << block
+    @subscribers << JobExecutionSubscriber.new(job, block)
   end
 
   private
 
+  def stage
+    @job.deploy.try(:stage)
+  end
+
   def error!(exception)
-    message = "JobExecution failed: #{exception.message}"
-
-    if defined?(Airbrake) && !exception.is_a?(Samson::Hooks::UserError)
-      Airbrake.notify(exception,
-        error_message: message,
-        parameters: {
-          job_id: @job.id
-        }
-      )
-    end
-
-    @output.write(message + "\n")
+    puts_if_present report_to_airbrake(exception)
+    puts_if_present "JobExecution failed: #{exception.message}"
+    puts_if_present render_backtrace(exception)
     @job.error! if @job.active?
   end
 
-  def run!(&block)
+  def run!
+    @output.write('', :started)
+
     @job.run!
 
     success = Dir.mktmpdir do |dir|
-      if block_given?
-        block.call(self, dir)
+      return @job.error! unless setup!(dir)
+
+      if @execution_block
+        @execution_block.call(self, dir)
       else
         execute!(dir)
       end
@@ -85,24 +113,22 @@ class JobExecution
     else
       @job.fail!
     end
-
   rescue => e
     error!(e)
   ensure
-    @output.close
-    @job.update_output!(OutputAggregator.new(@output).to_s)
-    @subscribers.each(&:call)
+    finish
     ActiveRecord::Base.clear_active_connections!
-    JobExecution.finished_job(@job)
+  end
+  add_transaction_tracer :run!,
+    category: :task,
+    params: '{ job_id: id, project: job.project.try(:name), reference: reference }'
+
+  def finish
+    @subscribers.each(&:call)
   end
 
   def execute!(dir)
-    if setup!(dir)
-      Samson::Hooks.fire(:after_deploy_setup, dir, stage) if stage
-    else
-      @job.error!
-      return
-    end
+    Samson::Hooks.fire(:after_deploy_setup, dir, @job, @output, @reference)
 
     FileUtils.mkdir_p(artifact_cache_dir)
     @output.write("\n# Executing deploy\n")
@@ -118,41 +144,75 @@ class JobExecution
     ActiveRecord::Base.clear_active_connections!
 
     ActiveSupport::Notifications.instrument("execute_shell.samson", payload) do
-      payload[:success] = @executor.execute!(*cmds)
+      payload[:success] =
+        if stage.try(:kubernetes)
+          @executor = Kubernetes::DeployExecutor.new(@output, job: @job, reference: @reference)
+          @executor.execute!
+        else
+          @executor.execute!(*cmds)
+        end
     end
+
+    Samson::Hooks.fire(:after_job_execution, @job, payload[:success], @output)
+
+    payload[:success]
   end
 
   def setup!(dir)
-    locked = lock_project do
-      return false unless @repository.setup!(dir, @reference)
-      commit = @repository.commit_from_ref(@reference)
-      tag = @repository.tag_from_ref(@reference)
-      @job.update_git_references!(commit: commit, tag: tag)
+    return unless resolve_ref_to_commit
+    stage.try(:kubernetes) || checkout_workspace(dir)
+  end
+
+  def checkout_workspace(dir)
+    locked = lock_repository do
+      return false unless @repository.checkout_workspace(dir, @reference)
     end
 
     if locked
       true
     else
-      @output.write("Could not get exclusive lock on repo. Maybe another stage is being deployed.\n")
+      @output.puts("Could not get exclusive lock on repo.")
+      false
+    end
+  end
+
+  def resolve_ref_to_commit
+    @repository.update_local_cache!
+    commit = @repository.commit_from_ref(@reference)
+    tag = @repository.tag_from_ref(@reference)
+    if commit
+      @job.update_git_references!(commit: commit, tag: tag)
+      @output.puts("Commit: #{commit}")
+      true
+    else
+      @output.puts("Could not find commit for #{@reference}")
       false
     end
   end
 
   def commands(dir)
-    commands = [
-      "export DEPLOY_URL=#{@job.full_url.shellescape}",
-      "export DEPLOYER=#{@job.user.email.shellescape}",
-      "export DEPLOYER_EMAIL=#{@job.user.email.shellescape}",
-      "export DEPLOYER_NAME=#{@job.user.name.shellescape}",
-      "export REVISION=#{@reference.shellescape}",
-      "export TAG=#{(@job.tag || @job.commit).to_s.shellescape}",
-      "export CACHE_DIR=#{artifact_cache_dir}",
-      "cd #{dir}",
-      *@job.commands
-    ]
-    if @stage && group_names = @stage.deploy_groups.pluck(:env_value).sort.map!(&:shellescape).join(" ")
-      commands.unshift("export DEPLOY_GROUPS='#{group_names}'") if group_names.presence
+    env = {
+      DEPLOY_URL: @job.url,
+      DEPLOYER: @job.user.email,
+      DEPLOYER_EMAIL: @job.user.email,
+      DEPLOYER_NAME: @job.user.name,
+      PROJECT_NAME: @job.project.name,
+      PROJECT_PERMALINK: @job.project.permalink,
+      PROJECT_REPOSITORY: @job.project.repository_url,
+      REFERENCE: @reference,
+      REVISION: @job.commit,
+      TAG: (@job.tag || @job.commit),
+      CACHE_DIR: artifact_cache_dir
+    }.merge(@env)
+
+    env.merge!(Hash[*Samson::Hooks.fire(:job_additional_vars, @job)])
+
+    commands = env.map do |key, value|
+      "export #{key}=#{value.shellescape}"
     end
+
+    commands << "cd #{dir}"
+    commands.concat(@job.commands)
     commands
   end
 
@@ -160,34 +220,60 @@ class JobExecution
     File.join(@repository.repo_cache_dir, "artifacts")
   end
 
-  def lock_project(&block)
+  def lock_repository(&block)
     holder = (stage.try(:name) || @job.user.name)
-    callback = proc { |owner| output.write("Waiting for repository while setting it up for #{owner}\n") if Time.now.to_i % 10 == 0 }
-    @job.project.with_lock(output: @output, holder: holder, error_callback: callback, timeout: lock_timeout, &block)
+    @job.project.repository.exclusive(output: @output, holder: holder, timeout: lock_timeout, &block)
+  end
+
+  # show full errors if we show exceptions
+  def render_backtrace(exception)
+    return unless Rails.application.config.consider_all_requests_local
+    backtrace = Rails.backtrace_cleaner.filter(exception.backtrace).first(10)
+    backtrace << '...'
+    backtrace.join("\n")
+  end
+
+  def report_to_airbrake(exception)
+    return if exception.is_a?(Samson::Hooks::UserError) # do not spam us with users issues
+
+    return unless error_id = Airbrake.notify(
+      exception,
+      error_message: exception.message,
+      parameters: {job_id: @job.id}
+    )
+
+    raise 'unable to find url' unless url = Airbrake.configuration.user_information[/['"](http.*?)['"]/, 1]
+    raise 'unable to find error' unless url.sub!('{{error_id}}', error_id)
+    "Error #{url}"
+  end
+
+  def puts_if_present(message)
+    @output.puts message if message
   end
 
   class << self
     def find_by_id(id)
-      registry[id.to_i]
+      registry.find(id)
     end
 
-    def start_job(reference, job, &block)
-      new(reference, job).tap do |job_execution|
-        if enabled
-          registry[job.id] = job_execution
-          job_execution.start!(&block)
-          ActiveSupport::Notifications.instrument "job.threads", thread_count: registry.length
-        end
-      end
+    def active?(id, key: id)
+      registry.active?(key, id)
     end
 
-    def all
-      registry.values
+    def queued?(id, key: id)
+      registry.queued?(key, id)
     end
 
-    def finished_job(job)
-      registry.delete(job.id)
-      ActiveSupport::Notifications.instrument "job.threads", thread_count: registry.length
+    def start_job(job_execution, key: job_execution.id)
+      registry.add(key, job_execution)
+    end
+
+    def active
+      registry.active
+    end
+
+    def clear_registry
+      registry.clear
     end
   end
 end

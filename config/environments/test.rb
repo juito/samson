@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 Samson::Application.configure do
   # Settings specified here will take precedence over those in config/application.rb.
 
@@ -10,13 +11,13 @@ Samson::Application.configure do
   # Do not eager load code on boot. This avoids loading your whole application
   # just for the purpose of running a single test. If you are using a tool that
   # preloads Rails for running tests, you may have to set it to true.
-  config.eager_load = false
+  config.eager_load = !!ENV['CI']
 
   # Configure static asset server for tests with Cache-Control for performance.
   # We don't need assets in test, so no need to compile/serve them
-  config.serve_static_files  = false
-  config.assets.compile = false
-  config.static_cache_control = "public, max-age=3600"
+  config.public_file_server.enabled = false
+  config.assets.compile = !!ENV['PRECOMPILE']
+  config.public_file_server.headers = { 'Cache-Control' => 'public, max-age=3600' }
 
   # Show full error reports and disable caching.
   config.consider_all_requests_local       = true
@@ -33,8 +34,7 @@ Samson::Application.configure do
   # ActionMailer::Base.deliveries array.
   config.action_mailer.delivery_method = :test
 
-  # Print deprecation notices to the stderr.
-  config.active_support.deprecation = :stderr
+  config.active_support.deprecation = :raise
 
   # By default, we don't want to actually execute jobs when testing. However,
   # this setting can be enabled on a per-test basis.
@@ -51,11 +51,3 @@ Samson::Application.configure do
 
   config.active_support.test_order = :random
 end
-
-ENV['SECRET_TOKEN'] = 'd6054cf90db212c8fbc070c896c30398e3275532c5602bdf00cb153b806c000e4e46fac2f3acc0783822b8f6d30b5913b6fbcfdd24914553e745b8aa8ddfa5a4'
-ENV['DEFAULT_URL'] = 'http://www.test-url.com'
-ENV['DATADOG_API_KEY'] = 'dapikey'
-ENV['DATADOG_APPLICATION_KEY'] = 'dappkey'
-ENV['JENKINS_URL']='http://www.test-url.com'
-ENV['JENKINS_USERNAME']='user@test.com'
-ENV['JENKINS_API_KEY']='japikey'

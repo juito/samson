@@ -1,4 +1,7 @@
+# frozen_string_literal: true
 require_relative '../test_helper'
+
+SingleCov.covered!
 
 describe FlowdockNotificationRenderer do
   it "renders a nicely formatted notification" do

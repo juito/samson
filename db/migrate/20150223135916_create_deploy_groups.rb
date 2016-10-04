@@ -1,4 +1,5 @@
-class CreateDeployGroups < ActiveRecord::Migration
+# frozen_string_literal: true
+class CreateDeployGroups < ActiveRecord::Migration[4.2]
   def change
     create_table :environments do |t|
       t.string :name, null: false

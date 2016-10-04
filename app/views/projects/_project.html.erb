@@ -2,15 +2,17 @@
   <div class="col-sm-4 project-tile">
     <h2>
       <%= link_to project.name, project %>
-      <%= render partial: 'shared/github_link', locals: { project: project } %>
+      <%= repository_web_link(project) %>
     </h2>
+
     <ul>
       <% project.stages.each do |stage| %>
-        <% cache [project.to_param, stage] do %>
+        <% cache stage do %>
           <li class="<%= 'locked' if stage.locked? %>">
             <%= link_to stage.name, [project, stage], class: 'stage-link' %>
             <%= link_to 'Deploying', [project, stage.current_deploy], class: 'label label-primary' if stage.currently_deploying? %>
             <%= content_tag :i, '', class: 'fa fa-lock', title: stage.lock.summary if stage.locked? %>
+            <%= stage.is_template ? stage_template_icon : '' %>
 
             <div class="pull-right">
               <% if stage.last_deploy.try(:failed?) %>
@@ -23,7 +25,7 @@
               <% if stage.last_successful_deploy %>
                 <%= link_to stage.last_successful_deploy.short_reference,
                             [project, stage.last_successful_deploy],
-                            class: "status label #{deploy_status(stage.last_successful_deploy.status, 'label')}" %>
+                            class: "status label #{status_label(stage.last_successful_deploy.status)}" %>
               <% end %>
             </div>
           </li>

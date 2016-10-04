@@ -1,5 +1,6 @@
+# frozen_string_literal: true
 class GithubDeployment
-  DEPLOYMENTS_PREVIEW_MEDIA_TYPE = "application/vnd.github.cannonball-preview+json".freeze
+  DEPLOYMENTS_PREVIEW_MEDIA_TYPE = "application/vnd.github.cannonball-preview+json"
 
   def initialize(deploy)
     @deploy = deploy
@@ -8,13 +9,13 @@ class GithubDeployment
   end
 
   def create_github_deployment
-    Rails.logger.info "Creating Github Deployment..."
+    Rails.logger.info "Creating GitHub Deployment..."
 
     GITHUB.create_deployment(@project.github_repo, @deploy.reference, deployment_options)
   end
 
   def update_github_deployment_status(deployment)
-    Rails.logger.info "Updating Github Deployment Status..."
+    Rails.logger.info "Updating GitHub Deployment Status..."
 
     GITHUB.create_deployment_status(deployment.url, state, deployment_status_options)
   end
@@ -52,6 +53,6 @@ class GithubDeployment
   end
 
   def url
-    AppRoutes.url_helpers.project_deploy_url(@project, @deploy)
+    Rails.application.routes.url_helpers.project_deploy_url(@project, @deploy)
   end
 end

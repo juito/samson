@@ -1,3 +1,4 @@
+# frozen_string_literal: true
 require 'thread_safe'
 
 # Allows fanning out a stream to multiple listening threads. Each thread will
@@ -21,19 +22,47 @@ require 'thread_safe'
 #   listener2.value #=> "hello world!"
 #
 class OutputBuffer
+  attr_reader :listeners
+
   def initialize
     @listeners = ThreadSafe::Array.new
     @previous = ThreadSafe::Array.new
     @closed = false
   end
 
-  def puts(line)
-    write(line.rstrip + "\n")
+  def puts(line = "")
+    write(line.to_s.rstrip << "\n")
   end
 
   def write(data, event = :message)
     @previous << [event, data] unless event == :close
-    @listeners.each {|listener| listener.push([event, data]) }
+    @listeners.dup.each { |listener| listener.push([event, data]) }
+  end
+
+  def write_docker_chunk(chunk)
+    parsed_chunk = JSON.parse(chunk)
+
+    # Don't bother printing all the incremental output when pulling images
+    unless parsed_chunk['progressDetail']
+      if parsed_chunk.keys == ['stream']
+        puts parsed_chunk.values.first
+      else
+        values = parsed_chunk.map { |k, v| "#{k}: #{v}" if v.present? }.compact
+        puts values.join(' | ') if values.any?
+      end
+    end
+
+    parsed_chunk
+  rescue JSON::ParserError
+    # Sometimes the JSON line is too big to fit in one chunk, so we get
+    # a chunk back that is an incomplete JSON object.
+    chunk = chunk.encode(Encoding::UTF_8, chunk.encoding, invalid: :replace, undef: :replace)
+    puts chunk
+    { 'message' => chunk }
+  end
+
+  def include?(event, data)
+    @previous.include?([event, data])
   end
 
   def to_s
@@ -59,7 +88,8 @@ class OutputBuffer
       queue = Queue.new
       @listeners << queue
 
-      @previous.each(&block) # race condition: possibly duplicate messages when message comes in between adding listener and this
+      # race condition: possibly duplicate messages when message comes in between adding listener and this
+      @previous.each(&block)
 
       while (chunk = queue.pop) && chunk.first != :close
         yield chunk

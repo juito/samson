@@ -1,27 +1,58 @@
+# frozen_string_literal: true
 class Integrations::BaseController < ApplicationController
-  skip_before_action :login_users
+  skip_around_action :login_user
   skip_before_action :verify_authenticity_token
+  before_action :validate_request
+  after_action :record_webhook
 
   def create
-    if deploy?
-      create_new_release
-      unless deploy_to_stages
-        head :unprocessable_entity
-        return
-      end
+    unless deploy?
+      record_log :info, "Request is not a deploy"
+      return head(:ok)
     end
 
-    head :ok
+    release = project.create_releases_for_branch?(branch)
+    record_log :info, "Branch #{branch} is release branch: #{release}"
+    if release
+      create_release_and_build_record
+    end
+
+    if project.build_docker_image_for_branch?(branch)
+      create_docker_image
+    end
+
+    if deploy_to_stages
+      record_log :info, "Starting deploy to all stages"
+      head(:ok)
+    else
+      head(:unprocessable_entity, message: 'Failed to start all deploys')
+    end
   end
 
   protected
 
+  # These methods can/must be overridden by subclasses
+
+  def validate_request
+    true # can be overridden in subclasses
+  end
+
+  def commit
+    raise NotImplementedError, "#commit must be overridden in a subclass"
+  end
+
+  def deploy?
+    raise NotImplementedError, "#deploy? must be overridden in a subclass"
+  end
+
+  def release_params
+    { commit: commit, author: user }
+  end
+
   def create_new_release
-    if project.create_releases_for_branch?(branch)
-      unless project.last_release_contains_commit?(commit)
-        release_service = ReleaseService.new(project)
-        release_service.create_release!(commit: commit, author: user)
-      end
+    unless project.last_release_contains_commit?(commit)
+      release_service = ReleaseService.new(project)
+      release_service.create_release!(release_params)
     end
   end
 
@@ -45,10 +76,16 @@ class Integrations::BaseController < ApplicationController
   end
 
   def user
-    name = self.class.name.split("::").last.sub("Controller", "")
-    email = "deploy+#{name.underscore}@#{Rails.application.config.samson.email.sender_domain}"
+    @user ||= begin
+      name = self.class.name.split("::").last.sub("Controller", "")
+      email = "deploy+#{name.underscore}@#{Rails.application.config.samson.email.sender_domain}"
 
-    User.create_with(name: name, integration: true).find_or_create_by(email: email)
+      User.create_with(name: name, integration: true).find_or_create_by(email: email)
+    end
+  end
+
+  def message
+    ''
   end
 
   private
@@ -59,5 +96,44 @@ class Integrations::BaseController < ApplicationController
 
   def service_name
     @service_name ||= self.class.name.demodulize.sub('Controller', '').downcase
+  end
+
+  def create_release_and_build_record
+    release = create_new_release || latest_release
+    create_build(release.version, [release])
+  end
+
+  def create_build(label, releases = [])
+    @build ||= project.builds.where(git_sha: commit).last || project.builds.create!(
+      git_ref: branch,
+      git_sha: commit,
+      description: message,
+      creator: user,
+      label: label,
+      releases: releases
+    )
+  end
+
+  def create_docker_image
+    create_build(branch)
+    DockerBuilderService.new(@build).run!(push: true, tag_as_latest: true)
+  end
+
+  def latest_release
+    project.releases.order(:id).last
+  end
+
+  def record_log(level, message)
+    (@recorded_log ||= "".dup) << "#{level.upcase}: #{message}\n"
+    Rails.logger.public_send(level, message)
+  end
+
+  def record_webhook
+    WebhookRecorder.record(
+      project,
+      request: request,
+      response: response,
+      log: @recorded_log.to_s
+    )
   end
 end

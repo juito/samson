@@ -1,13 +1,16 @@
+# frozen_string_literal: true
 class Changeset
   attr_reader :repo, :previous_commit, :commit
+  BRANCH_TAGS = ["master", "develop"].freeze
 
   def initialize(repo, previous_commit, commit)
-    @repo, @commit = repo, commit
+    @repo = repo
+    @commit = commit
     @previous_commit = previous_commit || @commit
   end
 
   def github_url
-    "https://#{Rails.application.config.samson.github.web_url}/#{repo}/compare/#{commit_range}"
+    "#{Rails.application.config.samson.github.web_url}/#{repo}/compare/#{commit_range}"
   end
 
   def hotfix?
@@ -25,7 +28,7 @@ class Changeset
   end
 
   def commits
-    @commits ||= comparison.commits.map {|data| Commit.new(repo, data) }
+    @commits ||= comparison.commits.map { |data| Commit.new(repo, data) }
   end
 
   def files
@@ -70,17 +73,23 @@ class Changeset
     if empty?
       NullComparison.new(nil)
     else
+      # for branches that frequently change we make sure to always get the correct cache,
+      # others might get an outdated changeset if they are reviewed with different shas
+      if BRANCH_TAGS.include?(commit)
+        @commit = GITHUB.branch(repo, commit).commit[:sha]
+      end
+
       Rails.cache.fetch(cache_key) do
         GITHUB.compare(repo, previous_commit, commit)
       end
     end
-  rescue Octokit::Error => e
-    NullComparison.new("Github: #{e.message.sub("Octokit::", "").underscore.humanize}")
+  rescue Octokit::Error, Faraday::ConnectionFailed => e
+    NullComparison.new("GitHub: #{e.message.sub("Octokit::", "").underscore.humanize}")
   end
 
   def find_pull_requests
     numbers = commits.map(&:pull_request_number).compact
-    numbers.map {|num| PullRequest.find(repo, num) }.compact
+    numbers.map { |num| PullRequest.find(repo, num) }.compact
   end
 
   def cache_key

@@ -1,0 +1,56 @@
+<h1><%= @deploy_group.name %></h1>
+
+<section class="form-horizontal">
+  <div class="form-group">
+    <label class="col-lg-2 control-label">$DEPLOY_GROUPS value</label>
+    <div class="col-lg-4">
+      <p class="form-control-static"><%= @deploy_group.env_value %></p>
+    </div>
+  </div>
+
+  <div class="form-group">
+    <label class="col-lg-2 control-label">Environment</label>
+    <div class="col-lg-4">
+      <p class="form-control-static"><%= @deploy_group.environment.name %></p>
+    </div>
+  </div>
+
+  <div class="form-group">
+    <label class="col-lg-2 control-label">Used by</label>
+    <div class="col-lg-4">
+      <p class="form-control-static">
+        <% @deploy_group.deploy_groups_stages.group_by { |dgs| dgs.stage.project }.each do |project, dgs_group| %>
+          <h3><%= link_to project.name, project %></h3>
+          <% dgs_group.each do |dgs| %>
+            <%= link_to dgs.stage.name, [dgs.stage.project, dgs.stage] %><br/>
+          <% end %>
+        <% end %>
+      </p>
+    </div>
+  </div>
+
+  <%= Samson::Hooks.render_views(:deploy_group_show, self) %>
+
+  <div class="form-group">
+    <div class="col-lg-offset-2 col-lg-10">
+      <%= link_to "Edit", edit_admin_deploy_group_path(@deploy_group), class: "btn btn-primary" %>
+      <% if DeployGroup.enabled? %>
+        <%= link_to "Create Stages ...",
+                    create_all_stages_preview_admin_deploy_group_path(@deploy_group),
+                    class: "btn btn-default"
+        %>
+        <%= link_to "Deploy All Projects", deploy_all_admin_deploy_group_path(@deploy_group), class: "btn btn-default", data: { method: "post" } %>
+        <%= link_to "Merge #{@deploy_group.stages.cloned.count} Cloned Stages",
+                    merge_all_stages_admin_deploy_group_path(@deploy_group),
+                    class: "btn btn-default",
+                    data: {
+                      method: "post",
+                      confirm: "Stages will be deleted. Before deleting, each stage will have its Deploy Group added to the stage it was copied from. Stages affected are those cloned from a template stage, have exactly this deploy group, and are on a project that uses include_new_deploy_groups.\n\n" +
+                               "Merge #{@deploy_group.stages.cloned.count} cloned stages now?"
+                    }
+        %>
+    <% end %>
+      <%= link_to "Back", admin_deploy_groups_path, class: "btn btn-default" %>
+    </div>
+  </div>
+</section>

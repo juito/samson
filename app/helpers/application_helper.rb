@@ -1,18 +1,23 @@
+# frozen_string_literal: true
 require 'ansible'
 require 'github/markdown'
 
 module ApplicationHelper
+  BOOTSTRAP_FLASH_MAPPINGS = { notice: :info, error: :danger, authorization_error: :danger, success: :success }.freeze
+
   include Ansible
+  include DateTimeHelper
 
   cattr_reader(:github_status_cache_key) { 'github-status-ok' }
 
   def render_log(str)
     escaped = ERB::Util.html_escape(str)
-    ansi_escaped(escaped).gsub(/\[([A-Z]|[0-9]+)m?/, '').html_safe
+    ansi_escaped(escaped).html_safe
   end
 
+  # https://github.com/showdownjs/showdown/wiki/Markdown's-XSS-Vulnerability-(and-how-to-mitigate-it)
   def markdown(str)
-    GitHub::Markdown.render_gfm(str).html_safe
+    sanitize GitHub::Markdown.render_gfm(str)
   end
 
   def deploy_link(project, stage)
@@ -45,17 +50,9 @@ module ApplicationHelper
     render '/locks/lock', lock: global_lock if global_lock
   end
 
-  def relative_time(time)
-    content_tag(:span, time.rfc822, data: { time: datetime_to_js_ms(time) }, class: "mouseover")
-  end
-
-  def datetime_to_js_ms(utc_string)
-    utc_string.to_i * 1000
-  end
-
   def sortable(column, title = nil)
     title ||= column.titleize
-    direction = (column == sort_column && sort_direction == "asc") ? "desc" : "asc"
+    direction = (column == params[:sort] && params[:direction] == "asc" ? "desc" : "asc")
     link_to title, sort: column, direction: direction
   end
 
@@ -63,7 +60,7 @@ module ApplicationHelper
     status_url = Rails.application.config.samson.github.status_url
 
     Rails.cache.fetch(github_status_cache_key, expires_in: 5.minutes) do
-      response = Faraday.get("https://#{status_url}/api/status.json") do |req|
+      response = Faraday.get("#{status_url}/api/status.json") do |req|
         req.options.timeout = req.options.open_timeout = 1
       end
 
@@ -120,11 +117,69 @@ module ApplicationHelper
     content_tag :i, '', class: "glyphicon glyphicon-#{type}"
   end
 
-  def link_to_delete(path, body = 'Delete', options={})
-    link_to body, path, options.merge({ method: :delete, data: { confirm: "Are you sure?" } })
+  def link_to_delete(path, body = 'Delete', options = {})
+    resource = Array(path).last
+    message = (resource.is_a?(ActiveRecord::Base) ? "Delete this #{resource.class.name} ?" : "Are you sure ?")
+    link_to body, path, options.merge(method: :delete, data: { confirm: message })
   end
 
   def link_to_delete_button(path)
     link_to_delete(path, icon_tag('remove') + ' Delete', class: 'btn btn-danger')
+  end
+
+  # render collections without making brakeman trigger a dynamic render alert
+  # like `render collection` does
+  def static_render(collection)
+    render partial: collection.first.to_partial_path, collection: collection if collection.any?
+  end
+
+  # Flash type -> Bootstrap alert class
+  def flash_messages
+    flash.flat_map do |type, messages|
+      type = type.to_sym
+      bootstrap_class = BOOTSTRAP_FLASH_MAPPINGS[type] || :info
+      Array.wrap(messages).map do |message|
+        [type, bootstrap_class, message]
+      end
+    end
+  end
+
+  def link_to_url(url)
+    link_to(url, url)
+  end
+
+  def environments
+    @environments ||= Environment.all
+  end
+
+  def render_nested_errors(object, seen = Set.new)
+    return "" if seen.include?(object)
+    seen << object
+    return "" if object.errors.empty?
+
+    content_tag :ul do
+      lis = object.errors.map do |attribute, message|
+        content_tag(:li) do
+          content = "".html_safe
+          content << object.errors.full_message(attribute, message)
+          values = (object.respond_to?(attribute) ? Array.wrap(object.send(attribute)) : [])
+          if values.first.is_a?(ActiveRecord::Base)
+            values.each do |value|
+              content << render_nested_errors(value, seen)
+            end
+          end
+          content
+        end
+      end
+      safe_join lis
+    end
+  end
+
+  def link_to_history(resource)
+    link_to "History (#{resource.versions.count})", versions_path(item_id: resource.id, item_type: resource.class.name)
+  end
+
+  def additional_info(text)
+    content_tag :i, '', class: "glyphicon glyphicon-info-sign", title: text
   end
 end

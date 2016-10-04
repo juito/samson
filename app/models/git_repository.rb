@@ -1,5 +1,8 @@
+# frozen_string_literal: true
 class GitRepository
-  attr_reader :repository_url, :repository_directory
+  include ::NewRelic::Agent::MethodTracer
+
+  attr_reader :repository_url, :repository_directory, :last_pulled
   attr_accessor :executor
 
   # The directory in which repositories should be cached.
@@ -13,56 +16,36 @@ class GitRepository
     @executor = executor
   end
 
-  def setup!(temp_dir, git_reference)
-    raise ArgumentError.new("git_reference is required") if git_reference.blank?
+  def checkout_workspace(temp_dir, git_reference)
+    raise ArgumentError, "git_reference is required" if git_reference.blank?
 
     executor.output.write("# Beginning git repo setup\n")
-    return false unless setup_local_cache!
-    return false unless clone!(from: repo_cache_dir, to: temp_dir)
-    return false unless checkout!(git_reference, pwd: temp_dir)
+    return false unless @last_pulled || update_local_cache!
+    return false unless create_workspace(temp_dir)
+    return false unless checkout!(git_reference, temp_dir)
     true
   end
 
-  def setup_local_cache!
+  # FIXME: always use exclusive
+  # atm we use exclusive only from a few placed that call this
+  def update_local_cache!
+    @last_pulled = Time.now
     if locally_cached?
       update!
     else
-      clone!(from: repository_url, to: repo_cache_dir, mirror: true)
+      clone!
     end
   end
 
-  def clone!(from: repository_url, to: repo_cache_dir, mirror: false)
-    if mirror
-      executor.execute!("git -c core.askpass=true clone --mirror #{from} #{to}")
-    else
-      executor.execute!("git clone #{from} #{to}")
-    end
-  end
-
-  def update!
-    executor.execute!("cd #{repo_cache_dir}", 'git fetch -p')
-  end
-
-  def commit_from_ref(git_reference, length: 7)
-    Dir.chdir(repo_cache_dir) do
-      description = IO.popen(['git', 'describe', '--long', '--tags', '--all', "--abbrev=#{length || 40}", git_reference], err: [:child, :out]) do |io|
-        io.read.strip
-      end
-
-      return nil unless $?.success?
-
-      description.split('-').last.sub(/^g/, '')
-    end
+  def commit_from_ref(git_reference)
+    return unless ensure_local_cache!
+    command = ['git', 'rev-parse', "#{git_reference}^{commit}"]
+    capture_stdout(*command)
   end
 
   def tag_from_ref(git_reference)
-    Dir.chdir(repo_cache_dir) do
-      tag = IO.popen(['git', 'describe', '--tags', git_reference], err: [:child, :out]) do |io|
-        io.read.strip
-      end
-
-      tag if $?.success?
-    end
+    return unless ensure_local_cache!
+    capture_stdout 'git', 'describe', '--tags', git_reference
   end
 
   def repo_cache_dir
@@ -70,44 +53,81 @@ class GitRepository
   end
 
   def tags
-    cmd = "git for-each-ref refs/tags --sort=-authordate --format='%(refname)' --count=600 | sed 's/refs\\/tags\\///g'"
-    success, output = run_single_command(cmd) { |line| line.strip }
-    success ? output : []
+    return unless ensure_local_cache!
+    command = ["git", "for-each-ref", "refs/tags", "--sort=-authordate", "--format=%(refname)", "--count=600"]
+    return [] unless output = capture_stdout(*command)
+    output = output.gsub 'refs/tags/', ''
+    output.split("\n")
   end
 
   def branches
-    cmd = 'git branch --no-color --list'
-    success, output = run_single_command(cmd) { |line| line.sub('*', '').strip }
-    success ? output : []
+    return unless ensure_local_cache!
+    return [] unless output = capture_stdout('git', 'branch', '--list', '--no-column')
+    output.delete!('* ')
+    output.split("\n")
   end
 
   def clean!
     FileUtils.rm_rf(repo_cache_dir)
   end
+  add_method_tracer :clean!
 
   def valid_url?
     return false if repository_url.blank?
-
-    cmd = "git -c core.askpass=true ls-remote -h #{repository_url}"
-    valid, output = run_single_command(cmd, pwd: '.')
-    Rails.logger.error("Repository Path '#{repository_url}' is invalid: #{output}") unless valid
-    valid
-  end
-
-  def downstream_commit?(old_commit, new_commit)
-    return true if old_commit == new_commit
-    cmd = "git merge-base --is-ancestor #{old_commit} #{new_commit}"
-    status, output = run_single_command(cmd) { |line| line.strip }
-    $?.exitstatus == 1
+    output = capture_stdout "git", "-c", "core.askpass=true", "ls-remote", "-h", repository_url, dir: '.'
+    Rails.logger.error("Repository Path '#{repository_url}' is unreachable") unless output
+    !!output
   end
 
   def executor
     @executor ||= TerminalExecutor.new(StringIO.new)
   end
 
+  # will update the repo if sha is not found
+  def file_content(file, sha, pull: true)
+    if !pull
+      return unless locally_cached?
+    elsif sha =~ Build::SHA1_REGEX
+      (locally_cached? && sha_exist?(sha)) || update_local_cache!
+    else
+      update_local_cache!
+    end
+    capture_stdout "git", "show", "#{sha}:#{file}"
+  end
+
+  def exclusive(output: StringIO.new, holder:, timeout: 10.minutes, &block)
+    error_callback = proc do |owner|
+      output.write("Waiting for repository lock for #{owner}\n") if (Time.now.to_i % 10).zero?
+    end
+    MultiLock.lock(repo_cache_dir, holder, timeout: timeout, failed_to_lock: error_callback, &block)
+  end
+
   private
 
-  def checkout!(git_reference, pwd: repo_cache_dir)
+  def clone!
+    executor.execute! "git -c core.askpass=true clone --mirror #{repository_url} #{repo_cache_dir}"
+  end
+  add_method_tracer :clone!
+
+  def create_workspace(temp_dir)
+    executor.execute! "git clone #{repo_cache_dir} #{temp_dir}"
+  end
+  add_method_tracer :create_workspace
+
+  def update!
+    executor.execute!("cd #{repo_cache_dir}", 'git fetch -p')
+  end
+  add_method_tracer :update!
+
+  def sha_exist?(sha)
+    !!capture_stdout("git", "cat-file", "-t", sha)
+  end
+
+  def ensure_local_cache!
+    locally_cached? || update_local_cache!
+  end
+
+  def checkout!(git_reference, pwd)
     executor.execute!("cd #{pwd}", "git checkout --quiet #{git_reference.shellescape}")
   end
 
@@ -115,10 +135,13 @@ class GitRepository
     Dir.exist?(repo_cache_dir)
   end
 
-  def run_single_command(command, pwd: repo_cache_dir)
-    tmp_executor = TerminalExecutor.new(StringIO.new)
-    success = tmp_executor.execute!("cd #{pwd}", command)
-    result = tmp_executor.output.string.lines.map { |line| yield line if block_given? }.uniq.sort
-    [success, result]
+  # success: stdout as string
+  # error: nil
+  def capture_stdout(*command, dir: repo_cache_dir)
+    Dir.chdir(dir) do
+      env = {"PATH" => ENV["PATH"], "HOME" => ENV["HOME"]} # safer and also fixes locally running with hub gem
+      out = IO.popen(env, command, unsetenv_others: true, err: '/dev/null') { |io| io.read.strip }
+      out if $?.success?
+    end
   end
 end

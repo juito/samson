@@ -1,0 +1,46 @@
+<% @role.resource_name ||= @project.permalink.tr('_', '-') + '-' %>
+<%= form_for [@project, @role], html: { class: "form-horizontal" } do |form| %>
+  <%= render 'shared/errors', object: @role %>
+
+  <fieldset>
+    <div class="form-group">
+      <%= form.label :name, 'Name', class: "col-lg-2 control-label" %>
+      <div class="col-lg-2">
+        <%= form.text_field :name, class: "form-control" %>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <%= form.label :config_file, class: "col-lg-2 control-label" %>
+      <div class="col-lg-4">
+        <%= form.text_field :config_file, class: "form-control" %>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <%= form.label :service_name, class: "col-lg-2 control-label" %>
+      <div class="col-lg-4">
+        <%= form.text_field :service_name, class: "form-control" %>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <% pattern = Kubernetes::RoleVerifier::VALID_LABEL_JS %>
+      <%= form.label :resource_name, class: "col-lg-2 control-label" %>
+      <div class="col-lg-4">
+        <%= form.text_field :resource_name, class: "form-control", pattern: pattern %>
+      </div>
+      <%= additional_info "Name for the resource this role will create (service/job), must match #{pattern}" %>
+    </div>
+
+    <div class="form-group">
+      <div class="col-lg-offset-2 col-lg-10">
+        <% if current_user.admin_for?(@project) %>
+          <%= form.submit @role.persisted? ? 'Save' : 'Create', class: "btn btn-primary" %>
+          <%= link_to_delete [@project, @role], 'Delete', class: 'btn btn-default' if @role.persisted? %>
+        <% end %>
+        <%= link_to "Cancel", :back, class: 'btn btn-default' %>
+      </div>
+    </div>
+  </fieldset>
+<% end %>
